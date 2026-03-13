@@ -12,6 +12,9 @@ let wireframeOn = false;
 let initialCamPos = null;
 let initialTarget = null;
 let meshHierarchy = null; // { nodes tree }
+let animFrameId = null;
+let resizeObserver = null;
+let objectUrls = [];
 
 // --- DOM ---
 const dropZone = document.getElementById('dropZone');
@@ -176,10 +179,7 @@ async function handleModelFile(buffer, fileName) {
       if (mat.properties) {
         for (const prop of mat.properties) {
           if (prop.key === '$clr.diffuse' && prop.value && prop.value.length >= 3) {
-            const r = Math.min(1, (prop.value[0] || 0) * 255);
-            const g = Math.min(1, (prop.value[1] || 0) * 255);
-            const b = Math.min(1, (prop.value[2] || 0) * 255);
-            const col = new THREE.Color(r/255, g/255, b/255);
+            const col = new THREE.Color(prop.value[0] || 0, prop.value[1] || 0, prop.value[2] || 0);
             if (col.getHSL({}).l < 0.15) col.offsetHSL(0, 0, 0.35);
             color = col.getHex();
             break;
@@ -212,9 +212,10 @@ async function handleModelFile(buffer, fileName) {
     if (meshData.faces && meshData.faces.length > 0) {
       const indicesList = [];
       for (const face of meshData.faces) {
-        if (Array.isArray(face)) {
-          for (let i = 0; i < face.length; i++) {
-            indicesList.push(face[i]);
+        if (Array.isArray(face) && face.length >= 3) {
+          // Fan-triangulatie: [0,1,2,3,4] → [0,1,2], [0,2,3], [0,3,4]
+          for (let i = 1; i < face.length - 1; i++) {
+            indicesList.push(face[0], face[i], face[i + 1]);
           }
         }
       }
@@ -241,9 +242,14 @@ async function handleModelFile(buffer, fileName) {
   
   if (bodies.length === 0) throw new Error('Geen geometrie gevonden in model');
   
-  // Extract hierarchy (simplified: just node count)
-  const nodeCount = assimpJson.nodes ? 1 : 0; // Root node
-  
+  // Count nodes in hierarchy
+  function countNodes(node) {
+    let c = 1;
+    if (node.children) for (const child of node.children) c += countNodes(child);
+    return c;
+  }
+  const nodeCount = assimpJson.rootnode ? countNodes(assimpJson.rootnode) : bodies.length;
+
   parsedData = { bodies, totalVerts, totalFaces, fileSize: buffer.byteLength, materials: materialsMap, hierarchy: nodeCount };
 }
 
@@ -296,9 +302,27 @@ function updateMeshInfo() {
 }
 
 // --- 3D Preview ---
+function cleanupPreview() {
+  if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = null; }
+  if (resizeObserver) { resizeObserver.disconnect(); resizeObserver = null; }
+  if (meshGroup) {
+    meshGroup.children.forEach(m => {
+      m.geometry.dispose();
+      m.material.dispose();
+    });
+    meshGroup = null;
+  }
+  if (renderer) { renderer.dispose(); renderer = null; }
+  scene = null; camera = null; controls = null;
+  wireframeOn = false;
+  btnWireframe.classList.remove('active');
+}
+
 function setupPreview() {
   if (!parsedData) return;
-  
+
+  cleanupPreview();
+
   // Clear existing (keep toolbar)
   const toolbar = previewToolbar;
   previewPanel.innerHTML = '';
@@ -376,12 +400,12 @@ function setupPreview() {
   
   // Render loop
   function animate() {
-    requestAnimationFrame(animate);
+    animFrameId = requestAnimationFrame(animate);
     controls.update();
     renderer.render(scene, camera);
   }
   animate();
-  
+
   // Resize
   const ro = new ResizeObserver(() => {
     const w2 = previewPanel.clientWidth;
@@ -393,6 +417,7 @@ function setupPreview() {
     }
   });
   ro.observe(previewPanel);
+  resizeObserver = ro;
 }
 
 // --- Wireframe toggle ---
@@ -430,6 +455,9 @@ convertBtn.addEventListener('click', async () => {
   const formats = [...document.querySelectorAll('.format-btn.active')].map(b => b.dataset.format);
   if (formats.length === 0) { showError('Selecteer minstens één formaat.'); return; }
   hideError();
+  // Revoke oude Object URLs
+  for (const url of objectUrls) URL.revokeObjectURL(url);
+  objectUrls = [];
   results.innerHTML = '';
   
   const baseName = loadedFile.name.replace(/\.(stp|step|skp|fbx|obj|3ds|dae|ply|blend|gltf|glb|iges|igs|stl|dxf|usdz)$/i, '');
@@ -446,7 +474,7 @@ convertBtn.addEventListener('click', async () => {
         case 'gltf': [blob, ext] = [await exportGLTF(), 'gltf']; break;
         case 'ply': [blob, ext] = [exportPLY(), 'ply']; break;
         case 'dae': [blob, ext] = [exportDAE(), 'dae']; break;
-        case 'skp': [blob, ext] = [exportSKP(), 'rb']; break;
+        case 'skp': [blob, ext] = [exportSKP(), 'skp.rb']; break;
       }
       addResult(fmt.toUpperCase(), `${baseName}.${ext}`, blob);
     } catch (err) {
@@ -472,6 +500,11 @@ function getMergedMesh() {
     if (body.indices) {
       for (let i = 0; i < body.indices.length; i++) {
         allIndices.push(body.indices[i] + vertOffset);
+      }
+    } else {
+      // Genereer sequentiële indices voor bodies zonder index buffer
+      for (let i = 0; i < body.vertCount; i++) {
+        allIndices.push(i + vertOffset);
       }
     }
     vertOffset += body.vertCount;
@@ -544,6 +577,10 @@ function exportSTL() {
 function exportDXF() {
   const { vertices: v, indices: idx } = getMergedMesh();
   let dxf = '0\nSECTION\n2\nHEADER\n0\nENDSEC\n';
+  dxf += '0\nSECTION\n2\nTABLES\n';
+  dxf += '0\nTABLE\n2\nLAYER\n70\n1\n';
+  dxf += '0\nLAYER\n2\n0\n70\n0\n62\n7\n6\nCONTINUOUS\n';
+  dxf += '0\nENDTAB\n0\nENDSEC\n';
   dxf += '0\nSECTION\n2\nENTITIES\n';
   
   for (let i = 0; i < idx.length; i += 3) {
@@ -647,6 +684,7 @@ function exportPLY() {
 // --- Utils ---
 function addResult(format, filename, blob) {
   const url = URL.createObjectURL(blob);
+  objectUrls.push(url);
   const card = document.createElement('div');
   card.className = 'result-card';
   card.innerHTML = `
