@@ -574,31 +574,39 @@ async function exportGLTF() {
 }
 
 function exportSKP() {
-  const { vertices: v, indices: idx } = getMergedMesh();
-  let rb = '# SketchUp Ruby Script — gegenereerd door 3D Converter\n';
-  rb += '# Open SketchUp → Window → Ruby Console → load dit bestand\n';
-  rb += 'model = Sketchup.active_model\n';
-  rb += 'model.start_operation("Import 3D Model", true)\n';
-  rb += 'ents = model.active_entities\n';
-  rb += 'mesh = Geom::PolygonMesh.new\n';
+  const merged = getMergedMesh();
+  const v = merged.vertices;
+  const idx = merged.indices;
+  const lines = [];
+  lines.push('# SketchUp Ruby Script — gegenereerd door 3D Converter');
+  lines.push('# Open SketchUp → Window → Ruby Console → load dit bestand');
+  lines.push('model = Sketchup.active_model');
+  lines.push('model.start_operation("Import 3D Model", true)');
+  lines.push('ents = model.active_entities');
+  lines.push('mesh = Geom::PolygonMesh.new');
   
-  // Add vertices
   for (let i = 0; i < v.length; i += 3) {
-    // SketchUp uses inches, convert mm to inches (assume model is in mm)
-    rb += `mesh.add_point(Geom::Point3d.new(${v[i].toFixed(4)}, ${v[i+1].toFixed(4)}, ${v[i+2].toFixed(4)}))\n`;
+    lines.push('mesh.add_point(Geom::Point3d.new(' + v[i].toFixed(4) + ', ' + v[i+1].toFixed(4) + ', ' + v[i+2].toFixed(4) + '))');
   }
   
-  // Add faces via indices (1-based in SketchUp)
-  for (let i = 0; i < idx.length; i += 3) {
-    rb += `mesh.add_polygon(${idx[i]+1}, ${idx[i+1]+1}, ${idx[i+2]+1})\n`;
+  if (idx && idx.length > 0) {
+    for (let i = 0; i < idx.length; i += 3) {
+      lines.push('mesh.add_polygon(' + (idx[i]+1) + ', ' + (idx[i+1]+1) + ', ' + (idx[i+2]+1) + ')');
+    }
+  } else {
+    const vertCount = v.length / 3;
+    for (let i = 0; i < vertCount; i += 3) {
+      lines.push('mesh.add_polygon(' + (i+1) + ', ' + (i+2) + ', ' + (i+3) + ')');
+    }
   }
   
-  rb += 'group = ents.add_group\n';
-  rb += 'group.entities.fill_from_mesh(mesh, true, Geom::PolygonMesh::AUTO_SOFTEN)\n';
-  rb += 'model.commit_operation\n';
-  rb += 'puts "Model geïmporteerd: #{mesh.count_points} vertices, #{mesh.count_polygons} faces"\n';
+  lines.push('group = ents.add_group');
+  lines.push('group.entities.fill_from_mesh(mesh, true, Geom::PolygonMesh::AUTO_SOFTEN)');
+  lines.push('model.commit_operation');
+  lines.push('puts "Model imported: #{mesh.count_points} vertices, #{mesh.count_polygons} faces"');
   
-  return new Blob([rb], { type: 'text/x-ruby' });
+  const rb = lines.join('\n') + '\n';
+  return new Blob([rb], { type: 'text/plain' });
 }
 
 function exportDAE() {
