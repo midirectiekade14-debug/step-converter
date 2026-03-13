@@ -102,13 +102,13 @@
 <body>
   <div class="container">
     <h1><span>STEP</span> Converter</h1>
-    <p class="subtitle">Upload een .stp/.step bestand — conversie draait volledig in je browser (geen server)</p>
+    <p class="subtitle">Upload een 3D bestand (.stp, .step, .skp, .fbx, .obj, .3ds, .dae, .ply, .blend, .gltf, etc.) — conversie 100% in je browser 🚀</p>
     
     <div class="drop-zone" id="dropZone">
       <div class="icon">📦</div>
       <p>Sleep een STEP bestand hierheen of klik om te uploaden</p>
       <p class="filename" id="fileName"></p>
-      <input type="file" id="fileInput" accept=".stp,.step,.STEP,.STP" hidden>
+      <input type="file" id="fileInput" accept=".stp,.step,.skp,.fbx,.obj,.3ds,.dae,.ply,.blend,.gltf,.glb,.iges,.igs,.stl,.dxf,.gcode,.usdz" hidden>
     </div>
     
     <div class="error" id="errorBox"></div>
@@ -161,6 +161,7 @@
   }
   </script>
   <script src="https://cdn.jsdelivr.net/npm/occt-import-js@0.0.23/dist/occt-import-js.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/assimpjs@0.0.10/dist/assimpjs.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

@@ -57,60 +57,29 @@ const BODY_COLORS = [
 
 async function handleFile(file) {
   const ext = file.name.toLowerCase();
-  if (!ext.endsWith('.stp') && !ext.endsWith('.step')) {
-    showError('Alleen .stp/.step bestanden worden ondersteund.');
+  const cadExts = ['.stp', '.step', '.iges', '.igs'];
+  const modelExts = ['.skp', '.fbx', '.obj', '.3ds', '.dae', '.ply', '.blend', '.gltf', '.glb', '.stl', '.dxf', '.usdz'];
+  const isCad = cadExts.some(e => ext.endsWith(e));
+  const isModel = modelExts.some(e => ext.endsWith(e));
+  
+  if (!isCad && !isModel) {
+    showError('Onbekend formaat. Ondersteund: STEP/IGES (CAD), SKP/FBX/OBJ/3DS/DAE/PLY/BLEND/GLTF/GLB/STL/DXF/USDZ (3D modellen).');
     return;
   }
+  
   hideError();
   loadedFile = file;
   fileName.textContent = `${file.name} (${formatSize(file.size)})`;
   convertBtn.disabled = false;
   
-  showProgress('STEP bestand laden...', 10);
   try {
     const buffer = await file.arrayBuffer();
-    showProgress('OpenCascade WASM initialiseren...', 30);
-    const occt = await occtimportjs();
-    showProgress('Geometrie parsen...', 50);
-    const result = occt.ReadStepFile(new Uint8Array(buffer), null);
-    if (!result.success) throw new Error('Kan STEP bestand niet parsen');
     
-    // Parse per body (mesh) with colors
-    const bodies = [];
-    let totalVerts = 0;
-    let totalFaces = 0;
-    
-    for (let mi = 0; mi < result.meshes.length; mi++) {
-      const mesh = result.meshes[mi];
-      const pos = mesh.attributes.position;
-      const norm = mesh.attributes.normal;
-      if (!pos || !pos.array || pos.array.length === 0) continue;
-      
-      const verts = new Float32Array(pos.array);
-      const normals = norm && norm.array ? new Float32Array(norm.array) : null;
-      const indices = mesh.index && mesh.index.array ? new Uint32Array(mesh.index.array) : null;
-      
-      // Get color from mesh if available
-      let color = BODY_COLORS[mi % BODY_COLORS.length];
-      if (mesh.color) {
-        const c = mesh.color;
-        const col = new THREE.Color(c[0] / 255, c[1] / 255, c[2] / 255);
-        // Brighten very dark colors so they're visible against dark bg
-        if (col.getHSL({}).l < 0.15) col.offsetHSL(0, 0, 0.35);
-        color = col.getHex();
-      }
-      
-      const vertCount = verts.length / 3;
-      const faceCount = indices ? indices.length / 3 : vertCount / 3;
-      totalVerts += vertCount;
-      totalFaces += faceCount;
-      
-      bodies.push({ vertices: verts, indices, normals, color, vertCount, faceCount });
+    if (isCad) {
+      await handleCADFile(buffer, ext);
+    } else {
+      await handleModelFile(buffer, file.name);
     }
-    
-    if (bodies.length === 0) throw new Error('Geen geometrie gevonden in STEP bestand');
-    
-    parsedData = { bodies, totalVerts, totalFaces, fileSize: file.size };
     
     showProgress('3D preview laden...', 80);
     setupPreview();
@@ -121,6 +90,130 @@ async function handleFile(file) {
     showError(`Fout bij laden: ${err.message}`);
     progress.classList.remove('active');
   }
+}
+
+async function handleCADFile(buffer, ext) {
+  showProgress('STEP/IGES bestand laden...', 10);
+  showProgress('OpenCascade WASM initialiseren...', 30);
+  const occt = await occtimportjs();
+  showProgress('Geometrie parsen...', 50);
+  
+  let result;
+  if (ext.endsWith('.iges') || ext.endsWith('.igs')) {
+    result = occt.ReadIgesFile(new Uint8Array(buffer), null);
+  } else {
+    result = occt.ReadStepFile(new Uint8Array(buffer), null);
+  }
+  
+  if (!result.success) throw new Error('Kan CAD bestand niet parsen');
+  
+  const bodies = [];
+  let totalVerts = 0;
+  let totalFaces = 0;
+  
+  for (let mi = 0; mi < result.meshes.length; mi++) {
+    const mesh = result.meshes[mi];
+    const pos = mesh.attributes.position;
+    const norm = mesh.attributes.normal;
+    if (!pos || !pos.array || pos.array.length === 0) continue;
+    
+    const verts = new Float32Array(pos.array);
+    const normals = norm && norm.array ? new Float32Array(norm.array) : null;
+    const indices = mesh.index && mesh.index.array ? new Uint32Array(mesh.index.array) : null;
+    
+    let color = BODY_COLORS[mi % BODY_COLORS.length];
+    if (mesh.color) {
+      const c = mesh.color;
+      const col = new THREE.Color(c[0] / 255, c[1] / 255, c[2] / 255);
+      if (col.getHSL({}).l < 0.15) col.offsetHSL(0, 0, 0.35);
+      color = col.getHex();
+    }
+    
+    const vertCount = verts.length / 3;
+    const faceCount = indices ? indices.length / 3 : vertCount / 3;
+    totalVerts += vertCount;
+    totalFaces += faceCount;
+    
+    bodies.push({ vertices: verts, indices, normals, color, vertCount, faceCount });
+  }
+  
+  if (bodies.length === 0) throw new Error('Geen geometrie gevonden in CAD bestand');
+  
+  parsedData = { bodies, totalVerts, totalFaces, fileSize: buffer.byteLength };
+}
+
+async function handleModelFile(buffer, fileName) {
+  showProgress('3D model laden...', 10);
+  showProgress('Assimp WASM initialiseren...', 30);
+  
+  const ajs = await assimpjs();
+  showProgress('Model parsen...' ,50);
+  
+  // Convert to assjson (JSON format)
+  const fileList = new ajs.FileList();
+  fileList.AddFile(fileName, new Uint8Array(buffer));
+  const result = ajs.ConvertFileList(fileList, 'assjson');
+  
+  if (!result.IsSuccess() || result.FileCount() === 0) {
+    throw new Error(`Assimp konversie faalde: ${result.GetErrorCode()}`);
+  }
+  
+  // Parse result
+  const resultFile = result.GetFile(0);
+  const jsonStr = new TextDecoder().decode(resultFile.GetContent());
+  const assimpJson = JSON.parse(jsonStr);
+  
+  // Extract meshes from assimp JSON
+  const bodies = [];
+  let totalVerts = 0;
+  let totalFaces = 0;
+  
+  if (!assimpJson.meshes || assimpJson.meshes.length === 0) {
+    throw new Error('Geen meshes in model gevonden');
+  }
+  
+  for (let mi = 0; mi < assimpJson.meshes.length; mi++) {
+    const meshData = assimpJson.meshes[mi];
+    if (!meshData.vertices || meshData.vertices.length === 0) continue;
+    
+    // Convert flat vertex array to Float32Array
+    const vertices = new Float32Array(meshData.vertices);
+    
+    // Convert faces (array of arrays) to flat indices
+    let indices = null;
+    if (meshData.faces && meshData.faces.length > 0) {
+      const indicesList = [];
+      for (const face of meshData.faces) {
+        // face is [v0, v1, v2] or more vertices
+        if (Array.isArray(face)) {
+          for (let i = 0; i < face.length; i++) {
+            indicesList.push(face[i]);
+          }
+        }
+      }
+      indices = new Uint32Array(indicesList);
+    }
+    
+    // Convert normals if present
+    let normals = null;
+    if (meshData.normals && meshData.normals.length > 0) {
+      normals = new Float32Array(meshData.normals);
+    }
+    
+    // Color from material or palette
+    let color = BODY_COLORS[mi % BODY_COLORS.length];
+    
+    const vertCount = vertices.length / 3;
+    const faceCount = indices ? indices.length / 3 : vertCount / 3;
+    totalVerts += vertCount;
+    totalFaces += faceCount;
+    
+    bodies.push({ vertices, indices, normals, color, vertCount, faceCount });
+  }
+  
+  if (bodies.length === 0) throw new Error('Geen geometrie gevonden in model');
+  
+  parsedData = { bodies, totalVerts, totalFaces, fileSize: buffer.byteLength };
 }
 
 // --- Mesh Info ---
