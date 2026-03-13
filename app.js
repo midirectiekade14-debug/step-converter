@@ -4,12 +4,13 @@ import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 
 // --- State ---
 let loadedFile = null;
-let parsedData = null; // { bodies: [{ vertices, indices, normals, color }], totalVerts, totalFaces }
+let parsedData = null; // { bodies: [{ vertices, indices, normals, color, material }], totalVerts, totalFaces, materials, hierarchy }
 let scene, camera, renderer, controls;
 let meshGroup = null;
 let wireframeOn = false;
 let initialCamPos = null;
 let initialTarget = null;
+let meshHierarchy = null; // { nodes tree }
 
 // --- DOM ---
 const dropZone = document.getElementById('dropZone');
@@ -163,6 +164,32 @@ async function handleModelFile(buffer, fileName) {
   const jsonStr = new TextDecoder().decode(resultFile.GetContent());
   const assimpJson = JSON.parse(jsonStr);
   
+  // Extract materials
+  const materialsMap = {};
+  if (assimpJson.materials && assimpJson.materials.length > 0) {
+    for (let mi = 0; mi < assimpJson.materials.length; mi++) {
+      const mat = assimpJson.materials[mi];
+      let color = BODY_COLORS[mi % BODY_COLORS.length];
+      
+      // Try to extract color from material properties
+      if (mat.properties) {
+        for (const prop of mat.properties) {
+          if (prop.key === '$clr.diffuse' && prop.value && prop.value.length >= 3) {
+            const r = Math.min(1, (prop.value[0] || 0) * 255);
+            const g = Math.min(1, (prop.value[1] || 0) * 255);
+            const b = Math.min(1, (prop.value[2] || 0) * 255);
+            const col = new THREE.Color(r/255, g/255, b/255);
+            if (col.getHSL({}).l < 0.15) col.offsetHSL(0, 0, 0.35);
+            color = col.getHex();
+            break;
+          }
+        }
+      }
+      
+      materialsMap[mi] = { name: mat.name || `Material ${mi}`, color };
+    }
+  }
+  
   // Extract meshes from assimp JSON
   const bodies = [];
   let totalVerts = 0;
@@ -184,7 +211,6 @@ async function handleModelFile(buffer, fileName) {
     if (meshData.faces && meshData.faces.length > 0) {
       const indicesList = [];
       for (const face of meshData.faces) {
-        // face is [v0, v1, v2] or more vertices
         if (Array.isArray(face)) {
           for (let i = 0; i < face.length; i++) {
             indicesList.push(face[i]);
@@ -201,19 +227,23 @@ async function handleModelFile(buffer, fileName) {
     }
     
     // Color from material or palette
-    let color = BODY_COLORS[mi % BODY_COLORS.length];
+    const matIdx = meshData.materialindex !== undefined ? meshData.materialindex : mi;
+    const matData = materialsMap[matIdx] || { name: `Mesh ${mi}`, color: BODY_COLORS[mi % BODY_COLORS.length] };
     
     const vertCount = vertices.length / 3;
     const faceCount = indices ? indices.length / 3 : vertCount / 3;
     totalVerts += vertCount;
     totalFaces += faceCount;
     
-    bodies.push({ vertices, indices, normals, color, vertCount, faceCount });
+    bodies.push({ vertices, indices, normals, color: matData.color, material: matData.name, vertCount, faceCount });
   }
   
   if (bodies.length === 0) throw new Error('Geen geometrie gevonden in model');
   
-  parsedData = { bodies, totalVerts, totalFaces, fileSize: buffer.byteLength };
+  // Extract hierarchy (simplified: just node count)
+  const nodeCount = assimpJson.nodes ? 1 : 0; // Root node
+  
+  parsedData = { bodies, totalVerts, totalFaces, fileSize: buffer.byteLength, materials: materialsMap, hierarchy: nodeCount };
 }
 
 // --- Mesh Info ---
@@ -224,6 +254,19 @@ function updateMeshInfo() {
   document.getElementById('infoFaces').textContent = parsedData.totalFaces.toLocaleString('nl-NL');
   document.getElementById('infoBodies').textContent = parsedData.bodies.length;
   document.getElementById('infoSize').textContent = formatSize(parsedData.fileSize);
+  
+  // Add material count if available
+  if (parsedData.materials && Object.keys(parsedData.materials).length > 0) {
+    let matRow = document.getElementById('infoMaterials');
+    if (!matRow) {
+      matRow = document.createElement('div');
+      matRow.className = 'row';
+      matRow.id = 'infoMaterials';
+      matRow.innerHTML = '<span class="label">Materialen</span><span class="value"></span>';
+      document.getElementById('meshInfo').appendChild(matRow);
+    }
+    matRow.querySelector('.value').textContent = Object.keys(parsedData.materials).length;
+  }
   
   // Compute bounding box from all bodies
   const box = new THREE.Box3();
@@ -236,6 +279,19 @@ function updateMeshInfo() {
   const size = new THREE.Vector3();
   box.getSize(size);
   document.getElementById('infoDims').textContent = `${size.x.toFixed(1)} × ${size.y.toFixed(1)} × ${size.z.toFixed(1)}`;
+  
+  // Add mesh hierarchy if present
+  if (parsedData.bodies.length > 10) {
+    let hierarchyRow = document.getElementById('infoHierarchy');
+    if (!hierarchyRow) {
+      hierarchyRow = document.createElement('div');
+      hierarchyRow.className = 'row';
+      hierarchyRow.id = 'infoHierarchy';
+      hierarchyRow.innerHTML = '<span class="label">Meshes</span><span class="value"></span>';
+      document.getElementById('meshInfo').appendChild(hierarchyRow);
+    }
+    hierarchyRow.querySelector('.value').textContent = `${parsedData.bodies.length} onderdelen`;
+  }
 }
 
 // --- 3D Preview ---
@@ -419,6 +475,7 @@ function getMergedMesh() {
     vertices: new Float32Array(allVerts),
     indices: new Uint32Array(allIndices),
     normals: new Float32Array(allNormals),
+    materials: parsedData.bodies.map((b, i) => ({ name: b.material || `Mesh ${i}`, color: b.color })),
   };
 }
 
