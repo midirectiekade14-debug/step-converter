@@ -573,22 +573,62 @@ function exportSTL() {
   return new Blob([buf], { type: 'application/octet-stream' });
 }
 
+// Map hex color to nearest AutoCAD Color Index (ACI)
+function hexToACI(hex) {
+  const r = (hex >> 16) & 0xff, g = (hex >> 8) & 0xff, b = hex & 0xff;
+  // Basic ACI mapping: 1=red, 2=yellow, 3=green, 4=cyan, 5=blue, 6=magenta, 7=white
+  const aci = [
+    [255,0,0,1], [255,255,0,2], [0,255,0,3], [0,255,255,4],
+    [0,0,255,5], [255,0,255,6], [255,255,255,7],
+    [128,128,128,8], [192,192,192,9],
+    [255,128,128,11], [128,255,128,91], [128,128,255,171],
+    [255,200,100,41], [200,128,255,201], [100,200,200,131],
+  ];
+  let best = 7, bestDist = Infinity;
+  for (const [ar, ag, ab, idx] of aci) {
+    const d = (r-ar)**2 + (g-ag)**2 + (b-ab)**2;
+    if (d < bestDist) { bestDist = d; best = idx; }
+  }
+  return best;
+}
+
 function exportDXF() {
-  const { vertices: v, indices: idx } = getMergedMesh();
-  let dxf = '0\nSECTION\n2\nHEADER\n0\nENDSEC\n';
+  const bodies = parsedData.bodies;
+
+  // Header met versie
+  let dxf = '0\nSECTION\n2\nHEADER\n';
+  dxf += '9\n$ACADVER\n1\nAC1027\n'; // AutoCAD 2013 format
+  dxf += '9\n$INSUNITS\n70\n4\n'; // Millimeters
+  dxf += '0\nENDSEC\n';
+
+  // Layer table — één layer per body met kleur
   dxf += '0\nSECTION\n2\nTABLES\n';
-  dxf += '0\nTABLE\n2\nLAYER\n70\n1\n';
+  dxf += '0\nTABLE\n2\nLAYER\n70\n' + (bodies.length + 1) + '\n';
   dxf += '0\nLAYER\n2\n0\n70\n0\n62\n7\n6\nCONTINUOUS\n';
+  for (let bi = 0; bi < bodies.length; bi++) {
+    const aci = hexToACI(bodies[bi].color);
+    const name = bodies[bi].material || `Body_${bi + 1}`;
+    dxf += `0\nLAYER\n2\n${name}\n70\n0\n62\n${aci}\n6\nCONTINUOUS\n`;
+  }
   dxf += '0\nENDTAB\n0\nENDSEC\n';
+
+  // Entities — per body op eigen layer
   dxf += '0\nSECTION\n2\nENTITIES\n';
-  
-  for (let i = 0; i < idx.length; i += 3) {
-    const i0 = idx[i] * 3, i1 = idx[i+1] * 3, i2 = idx[i+2] * 3;
-    dxf += '0\n3DFACE\n8\n0\n';
-    dxf += `10\n${v[i0].toFixed(6)}\n20\n${v[i0+1].toFixed(6)}\n30\n${v[i0+2].toFixed(6)}\n`;
-    dxf += `11\n${v[i1].toFixed(6)}\n21\n${v[i1+1].toFixed(6)}\n31\n${v[i1+2].toFixed(6)}\n`;
-    dxf += `12\n${v[i2].toFixed(6)}\n22\n${v[i2+1].toFixed(6)}\n32\n${v[i2+2].toFixed(6)}\n`;
-    dxf += `13\n${v[i2].toFixed(6)}\n23\n${v[i2+1].toFixed(6)}\n33\n${v[i2+2].toFixed(6)}\n`;
+
+  for (let bi = 0; bi < bodies.length; bi++) {
+    const body = bodies[bi];
+    const v = body.vertices;
+    const idx = body.indices || (() => { const a = []; for (let i = 0; i < body.vertCount; i++) a.push(i); return new Uint32Array(a); })();
+    const layerName = body.material || `Body_${bi + 1}`;
+
+    for (let i = 0; i < idx.length; i += 3) {
+      const i0 = idx[i] * 3, i1 = idx[i+1] * 3, i2 = idx[i+2] * 3;
+      dxf += `0\n3DFACE\n8\n${layerName}\n`;
+      dxf += `10\n${v[i0].toFixed(6)}\n20\n${v[i0+1].toFixed(6)}\n30\n${v[i0+2].toFixed(6)}\n`;
+      dxf += `11\n${v[i1].toFixed(6)}\n21\n${v[i1+1].toFixed(6)}\n31\n${v[i1+2].toFixed(6)}\n`;
+      dxf += `12\n${v[i2].toFixed(6)}\n22\n${v[i2+1].toFixed(6)}\n32\n${v[i2+2].toFixed(6)}\n`;
+      dxf += `13\n${v[i2].toFixed(6)}\n23\n${v[i2+1].toFixed(6)}\n33\n${v[i2+2].toFixed(6)}\n`;
+    }
   }
   dxf += '0\nENDSEC\n0\nEOF\n';
   return new Blob([dxf], { type: 'application/dxf' });
@@ -610,37 +650,71 @@ async function exportGLTF() {
 }
 
 function exportSKP() {
-  const merged = getMergedMesh();
-  const v = merged.vertices;
-  const idx = merged.indices;
+  const bodies = parsedData.bodies;
   const lines = [];
+  lines.push('# ===========================================================================');
   lines.push('# SketchUp Ruby Script — gegenereerd door 3D Converter');
-  lines.push('# Open SketchUp → Window → Ruby Console → load dit bestand');
+  lines.push('# Gebruik: Plugins > Ruby Importer > Importeer .rb bestand');
+  lines.push('#    of: Window > Ruby Console → load "pad/naar/bestand.rb"');
+  lines.push('# ===========================================================================');
+  lines.push('');
   lines.push('model = Sketchup.active_model');
-  lines.push('model.start_operation("Import 3D Model", true)');
   lines.push('ents = model.active_entities');
-  lines.push('mesh = Geom::PolygonMesh.new');
-  
-  for (let i = 0; i < v.length; i += 3) {
-    lines.push('mesh.add_point(Geom::Point3d.new(' + v[i].toFixed(4) + ', ' + v[i+1].toFixed(4) + ', ' + v[i+2].toFixed(4) + '))');
+  lines.push('materials = model.materials');
+  lines.push('');
+  lines.push("model.start_operation('Import 3D Model', true)");
+  lines.push('');
+
+  // Materialen aanmaken per body
+  for (let bi = 0; bi < bodies.length; bi++) {
+    const name = bodies[bi].material || `Body_${bi + 1}`;
+    const hex = bodies[bi].color;
+    const r = (hex >> 16) & 0xff, g = (hex >> 8) & 0xff, b = hex & 0xff;
+    lines.push(`mat_${bi} = materials.add('${name.replace(/'/g, "\\\\'")}')`);
+    lines.push(`mat_${bi}.color = Sketchup::Color.new(${r}, ${g}, ${b})`);
   }
-  
-  if (idx && idx.length > 0) {
+  lines.push('');
+
+  // Per body: eigen PolygonMesh + group
+  for (let bi = 0; bi < bodies.length; bi++) {
+    const body = bodies[bi];
+    const v = body.vertices;
+    const idx = body.indices || (() => { const a = []; for (let i = 0; i < body.vertCount; i++) a.push(i); return new Uint32Array(a); })();
+    const name = body.material || `Body_${bi + 1}`;
+
+    lines.push(`# --- ${name} (${body.vertCount} verts, ${body.faceCount} faces) ---`);
+    lines.push(`mesh_${bi} = Geom::PolygonMesh.new(${body.vertCount}, ${Math.floor(idx.length / 3)})`);
+
+    // Punten (PolygonMesh indices zijn 1-based)
+    for (let i = 0; i < v.length; i += 3) {
+      // mm → inches (SketchUp intern)
+      const x = (v[i] / 25.4).toFixed(6);
+      const y = (v[i+1] / 25.4).toFixed(6);
+      const z = (v[i+2] / 25.4).toFixed(6);
+      lines.push(`mesh_${bi}.add_point(Geom::Point3d.new(${x}, ${y}, ${z}))`);
+    }
+
+    // Polygonen
     for (let i = 0; i < idx.length; i += 3) {
-      lines.push('mesh.add_polygon(' + (idx[i]+1) + ', ' + (idx[i+1]+1) + ', ' + (idx[i+2]+1) + ')');
+      lines.push(`mesh_${bi}.add_polygon(${idx[i]+1}, ${idx[i+1]+1}, ${idx[i+2]+1})`);
     }
-  } else {
-    const vertCount = v.length / 3;
-    for (let i = 0; i < vertCount; i += 3) {
-      lines.push('mesh.add_polygon(' + (i+1) + ', ' + (i+2) + ', ' + (i+3) + ')');
-    }
+
+    // Groep + fill + materiaal
+    lines.push(`grp_${bi} = ents.add_group`);
+    lines.push(`grp_${bi}.name = '${name.replace(/'/g, "\\\\'")}'`);
+    lines.push(`grp_${bi}.entities.fill_from_mesh(mesh_${bi}, true, Geom::PolygonMesh::AUTO_SOFTEN)`);
+    lines.push(`grp_${bi}.material = mat_${bi}`);
+    lines.push('');
   }
-  
-  lines.push('group = ents.add_group');
-  lines.push('group.entities.fill_from_mesh(mesh, true, Geom::PolygonMesh::AUTO_SOFTEN)');
+
   lines.push('model.commit_operation');
-  lines.push('puts "Model imported: #{mesh.count_points} vertices, #{mesh.count_polygons} faces"');
-  
+  lines.push('model.active_view.zoom_extents');
+  lines.push(`puts "Import voltooid: ${bodies.length} onderdelen"`);
+  for (let bi = 0; bi < bodies.length; bi++) {
+    const name = bodies[bi].material || `Body_${bi + 1}`;
+    lines.push(`puts "  ${name}: ${bodies[bi].vertCount} vertices, ${bodies[bi].faceCount} faces"`);
+  }
+
   const rb = lines.join('\n') + '\n';
   return new Blob([rb], { type: 'text/plain' });
 }
