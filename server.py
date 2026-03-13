@@ -66,20 +66,40 @@ class SUMaterialInput(ctypes.Structure):
 
 
 def find_sketchup_dll():
-    search_roots = [
-        os.path.join(os.environ.get("PROGRAMFILES", r"C:\Program Files"), "SketchUp"),
-        os.path.join(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"), "SketchUp"),
-    ]
+    pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+    pf86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
     candidates = []
-    for root in search_roots:
-        if not os.path.isdir(root):
-            continue
-        for entry in os.listdir(root):
-            dll = os.path.join(root, entry, "SketchUp", "SketchUpAPI.dll")
-            if os.path.isfile(dll):
-                candidates.append((entry, dll))
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    return candidates[0] if candidates else None
+
+    # Patroon 1: C:\Program Files\SketchUp\SketchUp 20XX\SketchUp\SketchUpAPI.dll
+    for root in [os.path.join(pf, "SketchUp"), os.path.join(pf86, "SketchUp")]:
+        if os.path.isdir(root):
+            for entry in os.listdir(root):
+                dll = os.path.join(root, entry, "SketchUp", "SketchUpAPI.dll")
+                if os.path.isfile(dll):
+                    candidates.append((entry, dll))
+
+    # Patroon 2: C:\Program Files\SketchUp 20XX\SketchUp\SketchUpAPI.dll (oudere versies)
+    for base in [pf, pf86]:
+        if os.path.isdir(base):
+            for entry in os.listdir(base):
+                if "sketchup" in entry.lower():
+                    dll = os.path.join(base, entry, "SketchUp", "SketchUpAPI.dll")
+                    if os.path.isfile(dll):
+                        candidates.append((entry, dll))
+                    # Patroon 3: DLL direct in de hoofdmap
+                    dll2 = os.path.join(base, entry, "SketchUpAPI.dll")
+                    if os.path.isfile(dll2):
+                        candidates.append((entry, dll2))
+
+    # Deduplicate en sorteer (nieuwste versie eerst)
+    seen = set()
+    unique = []
+    for name, path in candidates:
+        if path not in seen:
+            seen.add(path)
+            unique.append((name, path))
+    unique.sort(key=lambda x: x[0], reverse=True)
+    return unique[0] if unique else None
 
 
 class SketchUpAPI:
@@ -412,15 +432,34 @@ def main():
     print("=" * 50)
     if info:
         print(f"  SketchUp: {info[0]}")
+        print(f"  DLL:      {info[1]}")
     else:
-        print("  SketchUp: NIET GEVONDEN (SKP export uitgeschakeld)")
-    print(f"  Server:   http://localhost:{port}")
+        print("  SketchUp: NIET GEVONDEN")
+        print("")
+        print("  Gezocht in:")
+        pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+        pf86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+        print(f"    {pf}\\SketchUp\\*\\SketchUp\\SketchUpAPI.dll")
+        print(f"    {pf}\\SketchUp*\\SketchUp\\SketchUpAPI.dll")
+        print(f"    {pf86}\\SketchUp*\\SketchUp\\SketchUpAPI.dll")
+        print("")
+        print("  SKP export is uitgeschakeld.")
+        print("  Andere formats (OBJ, STL, DXF, GLB) werken gewoon.")
+    print(f"\n  Server:   http://localhost:{port}")
     print(f"  Stop:     Ctrl+C of sluit dit venster")
     print("=" * 50)
 
-    webbrowser.open(f"http://localhost:{port}")
-
+    import threading
     server = HTTPServer(("127.0.0.1", port), Handler)
+
+    # Open browser zodra server draait
+    def open_browser():
+        import time
+        time.sleep(0.5)
+        webbrowser.open(f"http://localhost:{port}")
+
+    threading.Thread(target=open_browser, daemon=True).start()
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
