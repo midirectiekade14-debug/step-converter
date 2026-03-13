@@ -65,31 +65,64 @@ class SUMaterialInput(ctypes.Structure):
     ]
 
 
-def find_sketchup_dll():
+def find_sketchup_dll(custom_path=None):
+    # Direct pad opgegeven?
+    if custom_path:
+        if os.path.isfile(custom_path) and custom_path.lower().endswith("sketchupapi.dll"):
+            return (os.path.basename(os.path.dirname(custom_path)), custom_path)
+        # Misschien een map opgegeven — zoek de DLL erin
+        for sub in ["SketchUp", "."]:
+            dll = os.path.join(custom_path, sub, "SketchUpAPI.dll") if sub != "." else os.path.join(custom_path, "SketchUpAPI.dll")
+            if os.path.isfile(dll):
+                return (os.path.basename(custom_path), dll)
+        return None
+
     pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
     pf86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+    home = os.environ.get("USERPROFILE", os.path.expanduser("~"))
     candidates = []
 
-    # Patroon 1: C:\Program Files\SketchUp\SketchUp 20XX\SketchUp\SketchUpAPI.dll
-    for root in [os.path.join(pf, "SketchUp"), os.path.join(pf86, "SketchUp")]:
-        if os.path.isdir(root):
-            for entry in os.listdir(root):
-                dll = os.path.join(root, entry, "SketchUp", "SketchUpAPI.dll")
-                if os.path.isfile(dll):
-                    candidates.append((entry, dll))
+    # Alle plekken om te zoeken
+    search_bases = [
+        pf, pf86,
+        os.path.join(pf, "SketchUp"),
+        os.path.join(pf86, "SketchUp"),
+        os.path.join(home, "Programs"),
+        os.path.join(home, "AppData", "Local", "Programs"),
+        # Drives root
+        r"C:\SketchUp",
+        r"D:\SketchUp",
+        r"D:\Program Files\SketchUp",
+        r"D:\Program Files",
+    ]
 
-    # Patroon 2: C:\Program Files\SketchUp 20XX\SketchUp\SketchUpAPI.dll (oudere versies)
-    for base in [pf, pf86]:
-        if os.path.isdir(base):
-            for entry in os.listdir(base):
-                if "sketchup" in entry.lower():
-                    dll = os.path.join(base, entry, "SketchUp", "SketchUpAPI.dll")
-                    if os.path.isfile(dll):
-                        candidates.append((entry, dll))
-                    # Patroon 3: DLL direct in de hoofdmap
-                    dll2 = os.path.join(base, entry, "SketchUpAPI.dll")
-                    if os.path.isfile(dll2):
-                        candidates.append((entry, dll2))
+    for base in search_bases:
+        if not os.path.isdir(base):
+            continue
+        for entry in os.listdir(base):
+            if "sketchup" not in entry.lower():
+                continue
+            full = os.path.join(base, entry)
+            if not os.path.isdir(full):
+                continue
+            # Zoek SketchUpAPI.dll in alle submappen (max 2 diep)
+            for dll_path in [
+                os.path.join(full, "SketchUp", "SketchUpAPI.dll"),
+                os.path.join(full, "SketchUpAPI.dll"),
+            ]:
+                if os.path.isfile(dll_path):
+                    candidates.append((entry, dll_path))
+            # Extra: submappen doorzoeken (bijv. SketchUp\SketchUp 2021\SketchUp\)
+            if os.path.isdir(full):
+                for sub in os.listdir(full):
+                    sub_full = os.path.join(full, sub)
+                    if os.path.isdir(sub_full):
+                        for dll_path in [
+                            os.path.join(sub_full, "SketchUp", "SketchUpAPI.dll"),
+                            os.path.join(sub_full, "SketchUpAPI.dll"),
+                        ]:
+                            if os.path.isfile(dll_path):
+                                candidates.append((sub, dll_path))
 
     # Deduplicate en sorteer (nieuwste versie eerst)
     seen = set()
@@ -415,18 +448,39 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     port = PORT
-    if len(sys.argv) > 1:
-        try:
-            port = int(sys.argv[1])
-        except:
-            pass
+    sketchup_path = None
+
+    i = 1
+    while i < len(sys.argv):
+        if sys.argv[i] == "--sketchup" and i + 1 < len(sys.argv):
+            sketchup_path = sys.argv[i + 1]
+            i += 2
+        elif sys.argv[i] == "--port" and i + 1 < len(sys.argv):
+            port = int(sys.argv[i + 1])
+            i += 2
+        else:
+            try:
+                port = int(sys.argv[i])
+            except ValueError:
+                pass
+            i += 1
 
     if not os.path.isdir(WEB_DIR):
         print(f"FOUT: Web directory niet gevonden: {WEB_DIR}")
         print("Zorg dat index.html en app.js in de 'web' submap staan.")
         sys.exit(1)
 
-    info = find_sketchup_dll()
+    info = find_sketchup_dll(sketchup_path)
+
+    # Als niet gevonden en geen custom pad: vraag de gebruiker
+    if not info and not sketchup_path:
+        print("SketchUp niet automatisch gevonden.")
+        print("Weet je waar SketchUp staat? Voer het pad in (of Enter om over te slaan):")
+        print('  Bijv: C:\\Program Files\\SketchUp 2021')
+        user_input = input("  Pad: ").strip().strip('"')
+        if user_input:
+            info = find_sketchup_dll(user_input)
+
     print("=" * 50)
     print("  3D Converter + SKP Export")
     print("=" * 50)
@@ -436,12 +490,8 @@ def main():
     else:
         print("  SketchUp: NIET GEVONDEN")
         print("")
-        print("  Gezocht in:")
-        pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
-        pf86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
-        print(f"    {pf}\\SketchUp\\*\\SketchUp\\SketchUpAPI.dll")
-        print(f"    {pf}\\SketchUp*\\SketchUp\\SketchUpAPI.dll")
-        print(f"    {pf86}\\SketchUp*\\SketchUp\\SketchUpAPI.dll")
+        print("  Tip: start opnieuw met --sketchup pad, bijv:")
+        print('    "3D Converter.exe" --sketchup "C:\\Program Files\\SketchUp 2021"')
         print("")
         print("  SKP export is uitgeschakeld.")
         print("  Andere formats (OBJ, STL, DXF, GLB) werken gewoon.")
