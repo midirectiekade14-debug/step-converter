@@ -81,6 +81,8 @@ async function handleFile(file) {
     
     if (isCad) {
       await handleCADFile(buffer, ext);
+    } else if (ext.endsWith('.dxf')) {
+      await handleDXFFile(buffer);
     } else {
       await handleModelFile(buffer, file.name);
     }
@@ -144,6 +146,90 @@ async function handleCADFile(buffer, ext) {
   if (bodies.length === 0) throw new Error('Geen geometrie gevonden in CAD bestand');
   
   parsedData = { bodies, totalVerts, totalFaces, fileSize: buffer.byteLength };
+}
+
+async function handleDXFFile(buffer) {
+  showProgress('DXF bestand parsen...', 30);
+  const text = new TextDecoder().decode(buffer);
+  const lines = text.split(/\r?\n/);
+
+  // Parse 3DFACE entities
+  const layerFaces = {};  // layer -> [{p0,p1,p2,p3}]
+  let i = 0;
+  while (i < lines.length - 1) {
+    if (lines[i].trim() === '0' && lines[i+1].trim() === '3DFACE') {
+      i += 2;
+      let layer = '0';
+      const pts = {};
+      while (i < lines.length - 1) {
+        const code = parseInt(lines[i].trim());
+        const val = lines[i+1].trim();
+        if (code === 0) break; // next entity
+        if (code === 8) layer = val;
+        // Vertex coords: 10-13=x, 20-23=y, 30-33=z
+        if (code >= 10 && code <= 13) { const pi = code - 10; if (!pts[pi]) pts[pi] = {}; pts[pi].x = parseFloat(val); }
+        if (code >= 20 && code <= 23) { const pi = code - 20; if (!pts[pi]) pts[pi] = {}; pts[pi].y = parseFloat(val); }
+        if (code >= 30 && code <= 33) { const pi = code - 30; if (!pts[pi]) pts[pi] = {}; pts[pi].z = parseFloat(val); }
+        i += 2;
+      }
+      if (pts[0] && pts[1] && pts[2]) {
+        if (!layerFaces[layer]) layerFaces[layer] = [];
+        layerFaces[layer].push(pts);
+      }
+    } else {
+      i++;
+    }
+  }
+
+  const layerNames = Object.keys(layerFaces);
+  if (layerNames.length === 0) throw new Error('Geen 3DFACE entities gevonden in DXF');
+
+  showProgress('Mesh opbouwen...', 60);
+  const bodies = [];
+  let totalVerts = 0, totalFaces = 0;
+
+  for (let li = 0; li < layerNames.length; li++) {
+    const name = layerNames[li];
+    const faces = layerFaces[name];
+    const verts = [];
+    const indices = [];
+    let vi = 0;
+
+    for (const face of faces) {
+      // Triangle: p0-p1-p2
+      verts.push(face[0].x, face[0].y, face[0].z);
+      verts.push(face[1].x, face[1].y, face[1].z);
+      verts.push(face[2].x, face[2].y, face[2].z);
+      indices.push(vi, vi+1, vi+2);
+      vi += 3;
+
+      // Quad: als p3 verschilt van p2, voeg tweede driehoek toe
+      if (face[3] && (face[3].x !== face[2].x || face[3].y !== face[2].y || face[3].z !== face[2].z)) {
+        verts.push(face[0].x, face[0].y, face[0].z);
+        verts.push(face[2].x, face[2].y, face[2].z);
+        verts.push(face[3].x, face[3].y, face[3].z);
+        indices.push(vi, vi+1, vi+2);
+        vi += 3;
+      }
+    }
+
+    const vertCount = verts.length / 3;
+    const faceCount = indices.length / 3;
+    totalVerts += vertCount;
+    totalFaces += faceCount;
+
+    bodies.push({
+      vertices: new Float32Array(verts),
+      indices: new Uint32Array(indices),
+      normals: null,
+      vertCount, faceCount,
+      color: BODY_COLORS[li % BODY_COLORS.length],
+      material: name,
+    });
+  }
+
+  parsedData = { bodies, totalVerts, totalFaces, materials: layerNames };
+  showProgress('DXF geladen!', 90);
 }
 
 async function handleModelFile(buffer, fileName) {
@@ -473,6 +559,7 @@ convertBtn.addEventListener('click', async () => {
         case 'gltf': [blob, ext] = [await exportGLTF(), 'gltf']; break;
         case 'ply': [blob, ext] = [exportPLY(), 'ply']; break;
         case 'dae': [blob, ext] = [exportDAE(), 'dae']; break;
+        case '3ds': [blob, ext] = [export3DS(), '3ds']; break;
         case 'skp': {
           blob = await exportSKP();
           ext = blob.type === 'application/octet-stream' ? 'skp' : 'obj';
@@ -625,20 +712,22 @@ function hexToACI(hex) {
 
 function exportDXF() {
   const bodies = parsedData.bodies;
+  // Sanitize layer name: geen spaties, max 31 chars, alleen A-Z 0-9 _ -
+  const safeName = (s) => (s || 'Body').replace(/[^A-Za-z0-9_-]/g, '_').substring(0, 31);
 
-  // Header met versie
+  // Header — AC1009 (DXF R12) voor maximale compatibiliteit (SketchUp, AutoCAD, FreeCAD)
   let dxf = '0\nSECTION\n2\nHEADER\n';
-  dxf += '9\n$ACADVER\n1\nAC1027\n'; // AutoCAD 2013 format
-  dxf += '9\n$INSUNITS\n70\n4\n'; // Millimeters
+  dxf += '9\n$ACADVER\n1\nAC1009\n';
+  dxf += '9\n$INSUNITS\n70\n4\n';
   dxf += '0\nENDSEC\n';
 
-  // Layer table — één layer per body met kleur
+  // Layer table
   dxf += '0\nSECTION\n2\nTABLES\n';
   dxf += '0\nTABLE\n2\nLAYER\n70\n' + (bodies.length + 1) + '\n';
   dxf += '0\nLAYER\n2\n0\n70\n0\n62\n7\n6\nCONTINUOUS\n';
   for (let bi = 0; bi < bodies.length; bi++) {
     const aci = hexToACI(bodies[bi].color || 0x888888);
-    const name = bodies[bi].material || `Body_${bi + 1}`;
+    const name = safeName(bodies[bi].material || `Body_${bi + 1}`);
     dxf += `0\nLAYER\n2\n${name}\n70\n0\n62\n${aci}\n6\nCONTINUOUS\n`;
   }
   dxf += '0\nENDTAB\n0\nENDSEC\n';
@@ -650,7 +739,7 @@ function exportDXF() {
     const body = bodies[bi];
     const v = body.vertices;
     const idx = body.indices || (() => { const a = []; for (let i = 0; i < body.vertCount; i++) a.push(i); return new Uint32Array(a); })();
-    const layerName = body.material || `Body_${bi + 1}`;
+    const layerName = safeName(body.material || `Body_${bi + 1}`);
 
     for (let i = 0; i < idx.length; i += 3) {
       const i0 = idx[i] * 3, i1 = idx[i+1] * 3, i2 = idx[i+2] * 3;
@@ -702,6 +791,62 @@ async function exportSKP() {
   // Fallback: OBJ met instructie-header
   const header = '# === NATIVE SKP NODIG? ===\n# Draai: python obj2skp.py --serve\n# Herlaad daarna deze pagina en klik opnieuw op SKP\n#\n';
   return new Blob([header + objText], { type: 'text/plain' });
+}
+
+function export3DS() {
+  const { vertices: v, indices: idx } = getMergedMesh();
+  const vertCount = v.length / 3;
+  const faceCount = idx.length / 3;
+
+  // 3DS file structure: chunks with ID (uint16) + size (uint32)
+  // Main chunk 0x4D4D > Editor 0x3D3D > Object 0x4000 > Mesh 0x4100 > Vertices 0x4110 + Faces 0x4120
+
+  const nameBytes = new TextEncoder().encode('Mesh\0');
+  const vertDataSize = 2 + vertCount * 12;           // count(2) + verts(n*3*4)
+  const faceDataSize = 2 + faceCount * 8;             // count(2) + faces(n*4*2)
+  const vertChunkSize = 6 + vertDataSize;             // header(6) + data
+  const faceChunkSize = 6 + faceDataSize;
+  const meshChunkSize = 6 + vertChunkSize + faceChunkSize;
+  const objChunkSize = 6 + nameBytes.length + meshChunkSize;
+  const editorChunkSize = 6 + objChunkSize;
+  const mainChunkSize = 6 + editorChunkSize;
+
+  const buf = new ArrayBuffer(mainChunkSize);
+  const dv = new DataView(buf);
+  let o = 0;
+
+  function writeChunkHeader(id, size) {
+    dv.setUint16(o, id, true); o += 2;
+    dv.setUint32(o, size, true); o += 4;
+  }
+
+  // Main chunk
+  writeChunkHeader(0x4D4D, mainChunkSize);
+  // Editor chunk
+  writeChunkHeader(0x3D3D, editorChunkSize);
+  // Object chunk
+  writeChunkHeader(0x4000, objChunkSize);
+  // Object name (null-terminated)
+  for (let i = 0; i < nameBytes.length; i++) dv.setUint8(o++, nameBytes[i]);
+  // Trimesh chunk
+  writeChunkHeader(0x4100, meshChunkSize);
+  // Vertex list
+  writeChunkHeader(0x4110, vertChunkSize);
+  dv.setUint16(o, vertCount, true); o += 2;
+  for (let i = 0; i < v.length; i++) {
+    dv.setFloat32(o, v[i], true); o += 4;
+  }
+  // Face list
+  writeChunkHeader(0x4120, faceChunkSize);
+  dv.setUint16(o, faceCount, true); o += 2;
+  for (let i = 0; i < idx.length; i += 3) {
+    dv.setUint16(o, idx[i], true); o += 2;
+    dv.setUint16(o, idx[i+1], true); o += 2;
+    dv.setUint16(o, idx[i+2], true); o += 2;
+    dv.setUint16(o, 0, true); o += 2; // face flags
+  }
+
+  return new Blob([buf], { type: 'application/x-3ds' });
 }
 
 function exportDAE() {
