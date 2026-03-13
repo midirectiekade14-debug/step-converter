@@ -431,7 +431,7 @@ convertBtn.addEventListener('click', async () => {
   hideError();
   results.innerHTML = '';
   
-  const baseName = loadedFile.name.replace(/\.(stp|step)$/i, '');
+  const baseName = loadedFile.name.replace(/\.(stp|step|skp|fbx|obj|3ds|dae|ply|blend|gltf|glb|iges|igs|stl|dxf|usdz)$/i, '');
   
   for (const fmt of formats) {
     showProgress(`Exporteren naar ${fmt.toUpperCase()}...`, 50);
@@ -442,6 +442,8 @@ convertBtn.addEventListener('click', async () => {
         case 'stl': [blob, ext] = [exportSTL(), 'stl']; break;
         case 'dxf': [blob, ext] = [exportDXF(), 'dxf']; break;
         case 'glb': [blob, ext] = [await exportGLB(), 'glb']; break;
+        case 'gltf': [blob, ext] = [await exportGLTF(), 'gltf']; break;
+        case 'ply': [blob, ext] = [exportPLY(), 'ply']; break;
       }
       addResult(fmt.toUpperCase(), `${baseName}.${ext}`, blob);
     } catch (err) {
@@ -558,6 +560,42 @@ async function exportGLB() {
   const exporter = new GLTFExporter();
   const glb = await exporter.parseAsync(meshGroup, { binary: true });
   return new Blob([glb], { type: 'model/gltf-binary' });
+}
+
+async function exportGLTF() {
+  if (!meshGroup) throw new Error('Geen 3D scene beschikbaar');
+  const exporter = new GLTFExporter();
+  const gltf = await exporter.parseAsync(meshGroup, { binary: false });
+  const json = JSON.stringify(gltf, null, 2);
+  return new Blob([json], { type: 'model/gltf+json' });
+}
+
+function exportPLY() {
+  const { vertices: v, indices: idx, normals: n } = getMergedMesh();
+  const vertCount = v.length / 3;
+  const faceCount = idx.length / 3;
+  
+  let ply = 'ply\nformat ascii 1.0\n';
+  ply += `element vertex ${vertCount}\n`;
+  ply += 'property float x\nproperty float y\nproperty float z\n';
+  if (n.length > 0) {
+    ply += 'property float nx\nproperty float ny\nproperty float nz\n';
+  }
+  ply += `element face ${faceCount}\n`;
+  ply += 'property list uchar int vertex_indices\n';
+  ply += 'end_header\n';
+  
+  for (let i = 0; i < v.length; i += 3) {
+    ply += `${v[i].toFixed(6)} ${v[i+1].toFixed(6)} ${v[i+2].toFixed(6)}`;
+    if (n.length > 0) {
+      ply += ` ${n[i].toFixed(6)} ${n[i+1].toFixed(6)} ${n[i+2].toFixed(6)}`;
+    }
+    ply += '\n';
+  }
+  for (let i = 0; i < idx.length; i += 3) {
+    ply += `3 ${idx[i]} ${idx[i+1]} ${idx[i+2]}\n`;
+  }
+  return new Blob([ply], { type: 'application/x-ply' });
 }
 
 // --- Utils ---
