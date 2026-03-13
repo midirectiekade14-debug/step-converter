@@ -473,7 +473,11 @@ convertBtn.addEventListener('click', async () => {
         case 'gltf': [blob, ext] = [await exportGLTF(), 'gltf']; break;
         case 'ply': [blob, ext] = [exportPLY(), 'ply']; break;
         case 'dae': [blob, ext] = [exportDAE(), 'dae']; break;
-        case 'skp': [blob, ext] = [exportOBJ(), 'obj']; break;
+        case 'skp': {
+          blob = await exportSKP();
+          ext = blob.type === 'application/octet-stream' ? 'skp' : 'obj';
+          break;
+        }
       }
       addResult(fmt.toUpperCase(), `${baseName}.${ext}`, blob);
     } catch (err) {
@@ -676,7 +680,29 @@ async function exportGLTF() {
   return new Blob([json], { type: 'model/gltf+json' });
 }
 
-// exportSKP is now handled via OBJ export + obj2skp.py local converter
+async function exportSKP() {
+  // Genereer OBJ data
+  const objBlob = exportOBJ();
+  const objText = await objBlob.text();
+
+  // Probeer lokale converter server (python obj2skp.py --serve)
+  try {
+    const resp = await fetch('http://localhost:7890', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: objText,
+    });
+    if (resp.ok) {
+      return new Blob([await resp.arrayBuffer()], { type: 'application/octet-stream' });
+    }
+  } catch (e) {
+    // Server niet beschikbaar — fallback naar OBJ download met instructie
+  }
+
+  // Fallback: OBJ met instructie-header
+  const header = '# === NATIVE SKP NODIG? ===\n# Draai: python obj2skp.py --serve\n# Herlaad daarna deze pagina en klik opnieuw op SKP\n#\n';
+  return new Blob([header + objText], { type: 'text/plain' });
+}
 
 function exportDAE() {
   const { vertices: v, indices: idx, normals: n, materials: mats } = getMergedMesh();
