@@ -94,7 +94,10 @@ async function handleFile(file) {
       let color = BODY_COLORS[mi % BODY_COLORS.length];
       if (mesh.color) {
         const c = mesh.color;
-        color = new THREE.Color(c[0] / 255, c[1] / 255, c[2] / 255).getHex();
+        const col = new THREE.Color(c[0] / 255, c[1] / 255, c[2] / 255);
+        // Brighten very dark colors so they're visible against dark bg
+        if (col.getHSL({}).l < 0.15) col.offsetHSL(0, 0, 0.35);
+        color = col.getHex();
       }
       
       const vertCount = verts.length / 3;
@@ -153,7 +156,7 @@ function setupPreview() {
   toolbar.style.display = 'flex';
   
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x111111);
+  scene.background = new THREE.Color(0x1a1a2e);
   
   const w = previewPanel.clientWidth;
   const h = previewPanel.clientHeight || 400;
@@ -195,7 +198,7 @@ function setupPreview() {
   scene.add(meshGroup);
   
   // Lighting
-  scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+  scene.add(new THREE.AmbientLight(0xffffff, 0.7));
   const dir1 = new THREE.DirectionalLight(0xffffff, 0.8);
   dir1.position.set(5, 10, 7);
   scene.add(dir1);
