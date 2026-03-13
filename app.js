@@ -687,7 +687,7 @@ async function exportSKP() {
 
   // Probeer lokale converter server (python obj2skp.py --serve)
   try {
-    const resp = await fetch('http://localhost:7890', {
+    const resp = await fetch('http://localhost:7890/api/convert', {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
       body: objText,

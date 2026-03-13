@@ -221,19 +221,24 @@ class SketchUpAPI:
                 self.dll.SUGeometryInputRelease(ctypes.byref(gi))
 
             # Save to temp file
-            tmp = tempfile.mktemp(suffix=".skp")
-            path = tmp.encode("utf-8")
-            if version and version in SU_MODEL_VERSION:
-                self.ok(self.dll.SUModelSaveToFileWithVersion(model, path, SU_MODEL_VERSION[version]))
-            else:
-                self.ok(self.dll.SUModelSaveToFile(model, path))
+            tmp = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".skp", delete=False) as tf:
+                    tmp = tf.name
+                path = tmp.encode("utf-8")
+                if version and version in SU_MODEL_VERSION:
+                    self.ok(self.dll.SUModelSaveToFileWithVersion(model, path, SU_MODEL_VERSION[version]))
+                else:
+                    self.ok(self.dll.SUModelSaveToFile(model, path))
 
-            self.dll.SUModelRelease(ctypes.byref(model))
+                self.dll.SUModelRelease(ctypes.byref(model))
 
-            with open(tmp, "rb") as f:
-                data = f.read()
-            os.unlink(tmp)
-            return data
+                with open(tmp, "rb") as f:
+                    data = f.read()
+                return data
+            finally:
+                if tmp and os.path.exists(tmp):
+                    os.unlink(tmp)
 
         finally:
             self.dll.SUTerminate()
@@ -322,7 +327,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/":
             path = "/index.html"
 
-        filepath = os.path.join(WEB_DIR, path.lstrip("/"))
+        filepath = os.path.realpath(os.path.join(WEB_DIR, path.lstrip("/")))
+        web_root = os.path.realpath(WEB_DIR)
+        if not filepath.startswith(web_root + os.sep) and filepath != web_root:
+            self.send_response(403)
+            self.end_headers()
+            return
         if os.path.isfile(filepath):
             mime = mimetypes.guess_type(filepath)[0] or "application/octet-stream"
             with open(filepath, "rb") as f:
@@ -339,7 +349,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path.startswith("/api/convert"):
-            length = int(self.headers.get("Content-Length", 0))
+            MAX_BODY = 100 * 1024 * 1024  # 100 MB
+            length = min(int(self.headers.get("Content-Length", 0)), MAX_BODY)
             obj_data = self.rfile.read(length).decode("utf-8", errors="replace")
             version = self.headers.get("X-SKP-Version")
 
@@ -363,17 +374,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(skp_data)
                 print(f"    SKP: {len(skp_data):,} bytes")
             except Exception as e:
+                print(f"    FOUT: {e}")
                 self.send_response(500)
                 self._cors()
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({"error": str(e)}).encode())
+                self.wfile.write(json.dumps({"error": "Conversie mislukt"}).encode())
         else:
             self.send_response(404)
             self.end_headers()
 
     def _cors(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", f"http://localhost:{PORT}")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-SKP-Version")
 
