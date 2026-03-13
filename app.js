@@ -637,7 +637,7 @@ function exportDXF() {
   dxf += '0\nTABLE\n2\nLAYER\n70\n' + (bodies.length + 1) + '\n';
   dxf += '0\nLAYER\n2\n0\n70\n0\n62\n7\n6\nCONTINUOUS\n';
   for (let bi = 0; bi < bodies.length; bi++) {
-    const aci = hexToACI(bodies[bi].color);
+    const aci = hexToACI(bodies[bi].color || 0x888888);
     const name = bodies[bi].material || `Body_${bi + 1}`;
     dxf += `0\nLAYER\n2\n${name}\n70\n0\n62\n${aci}\n6\nCONTINUOUS\n`;
   }
