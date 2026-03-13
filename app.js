@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { ColladaExporter } from 'three/addons/exporters/ColladaExporter.js';
 
 // --- State ---
 let loadedFile = null;
@@ -444,6 +445,7 @@ convertBtn.addEventListener('click', async () => {
         case 'glb': [blob, ext] = [await exportGLB(), 'glb']; break;
         case 'gltf': [blob, ext] = [await exportGLTF(), 'gltf']; break;
         case 'ply': [blob, ext] = [exportPLY(), 'ply']; break;
+        case 'dae': [blob, ext] = [exportDAE(), 'dae']; break;
       }
       addResult(fmt.toUpperCase(), `${baseName}.${ext}`, blob);
     } catch (err) {
@@ -568,6 +570,13 @@ async function exportGLTF() {
   const gltf = await exporter.parseAsync(meshGroup, { binary: false });
   const json = JSON.stringify(gltf, null, 2);
   return new Blob([json], { type: 'model/gltf+json' });
+}
+
+function exportDAE() {
+  if (!meshGroup) throw new Error('Geen 3D scene beschikbaar');
+  const exporter = new ColladaExporter();
+  const result = exporter.parse(meshGroup);
+  return new Blob([result.data], { type: 'model/vnd.collada+xml' });
 }
 
 function exportPLY() {
