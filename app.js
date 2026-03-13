@@ -446,6 +446,7 @@ convertBtn.addEventListener('click', async () => {
         case 'gltf': [blob, ext] = [await exportGLTF(), 'gltf']; break;
         case 'ply': [blob, ext] = [exportPLY(), 'ply']; break;
         case 'dae': [blob, ext] = [exportDAE(), 'dae']; break;
+        case 'skp': [blob, ext] = [exportSKP(), 'rb']; break;
       }
       addResult(fmt.toUpperCase(), `${baseName}.${ext}`, blob);
     } catch (err) {
@@ -570,6 +571,34 @@ async function exportGLTF() {
   const gltf = await exporter.parseAsync(meshGroup, { binary: false });
   const json = JSON.stringify(gltf, null, 2);
   return new Blob([json], { type: 'model/gltf+json' });
+}
+
+function exportSKP() {
+  const { vertices: v, indices: idx } = getMergedMesh();
+  let rb = '# SketchUp Ruby Script — gegenereerd door 3D Converter\n';
+  rb += '# Open SketchUp → Window → Ruby Console → load dit bestand\n';
+  rb += 'model = Sketchup.active_model\n';
+  rb += 'model.start_operation("Import 3D Model", true)\n';
+  rb += 'ents = model.active_entities\n';
+  rb += 'mesh = Geom::PolygonMesh.new\n';
+  
+  // Add vertices
+  for (let i = 0; i < v.length; i += 3) {
+    // SketchUp uses inches, convert mm to inches (assume model is in mm)
+    rb += `mesh.add_point(Geom::Point3d.new(${v[i].toFixed(4)}, ${v[i+1].toFixed(4)}, ${v[i+2].toFixed(4)}))\n`;
+  }
+  
+  // Add faces via indices (1-based in SketchUp)
+  for (let i = 0; i < idx.length; i += 3) {
+    rb += `mesh.add_polygon(${idx[i]+1}, ${idx[i+1]+1}, ${idx[i+2]+1})\n`;
+  }
+  
+  rb += 'group = ents.add_group\n';
+  rb += 'group.entities.fill_from_mesh(mesh, true, Geom::PolygonMesh::AUTO_SOFTEN)\n';
+  rb += 'model.commit_operation\n';
+  rb += 'puts "Model geïmporteerd: #{mesh.count_points} vertices, #{mesh.count_polygons} faces"\n';
+  
+  return new Blob([rb], { type: 'text/x-ruby' });
 }
 
 function exportDAE() {
