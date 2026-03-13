@@ -1,10 +1,15 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 
 // --- State ---
 let loadedFile = null;
-let parsedMesh = null; // { vertices: Float32Array, indices: Uint32Array, normals: Float32Array }
+let parsedData = null; // { bodies: [{ vertices, indices, normals, color }], totalVerts, totalFaces }
 let scene, camera, renderer, controls;
+let meshGroup = null;
+let wireframeOn = false;
+let initialCamPos = null;
+let initialTarget = null;
 
 // --- DOM ---
 const dropZone = document.getElementById('dropZone');
@@ -14,9 +19,14 @@ const convertBtn = document.getElementById('convertBtn');
 const progress = document.getElementById('progress');
 const progressFill = document.getElementById('progressFill');
 const progressText = document.getElementById('progressText');
+const spinner = document.getElementById('spinner');
 const results = document.getElementById('results');
 const errorBox = document.getElementById('errorBox');
 const previewPanel = document.getElementById('previewPanel');
+const previewToolbar = document.getElementById('previewToolbar');
+const meshInfo = document.getElementById('meshInfo');
+const btnWireframe = document.getElementById('btnWireframe');
+const btnResetCam = document.getElementById('btnResetCam');
 
 // --- Format buttons ---
 const formatBtns = document.querySelectorAll('.format-btn');
@@ -38,6 +48,13 @@ fileInput.addEventListener('change', e => {
   if (e.target.files[0]) handleFile(e.target.files[0]);
 });
 
+// --- Default body colors (pastel palette for visual distinction) ---
+const BODY_COLORS = [
+  0x4fc3f7, 0x81c784, 0xffb74d, 0xba68c8, 0xe57373,
+  0x4dd0e1, 0xaed581, 0xff8a65, 0x9575cd, 0xf06292,
+  0x4db6ac, 0xdce775, 0xffd54f, 0x7986cb, 0xa1887f,
+];
+
 async function handleFile(file) {
   const ext = file.name.toLowerCase();
   if (!ext.endsWith('.stp') && !ext.endsWith('.step')) {
@@ -49,7 +66,6 @@ async function handleFile(file) {
   fileName.textContent = `${file.name} (${formatSize(file.size)})`;
   convertBtn.disabled = false;
   
-  // Parse immediately for preview
   showProgress('STEP bestand laden...', 10);
   try {
     const buffer = await file.arrayBuffer();
@@ -59,39 +75,43 @@ async function handleFile(file) {
     const result = occt.ReadStepFile(new Uint8Array(buffer), null);
     if (!result.success) throw new Error('Kan STEP bestand niet parsen');
     
-    // Merge all meshes
-    const allVerts = [];
-    const allIndices = [];
-    const allNormals = [];
-    let vertOffset = 0;
+    // Parse per body (mesh) with colors
+    const bodies = [];
+    let totalVerts = 0;
+    let totalFaces = 0;
     
-    for (const mesh of result.meshes) {
-      for (const attr of mesh.attributes) {
-        if (attr.name === 'position') {
-          for (let i = 0; i < attr.array.length; i++) allVerts.push(attr.array[i]);
-        }
-        if (attr.name === 'normal') {
-          for (let i = 0; i < attr.array.length; i++) allNormals.push(attr.array[i]);
-        }
+    for (let mi = 0; mi < result.meshes.length; mi++) {
+      const mesh = result.meshes[mi];
+      const pos = mesh.attributes.position;
+      const norm = mesh.attributes.normal;
+      if (!pos || !pos.array || pos.array.length === 0) continue;
+      
+      const verts = new Float32Array(pos.array);
+      const normals = norm && norm.array ? new Float32Array(norm.array) : null;
+      const indices = mesh.index && mesh.index.array ? new Uint32Array(mesh.index.array) : null;
+      
+      // Get color from mesh if available
+      let color = BODY_COLORS[mi % BODY_COLORS.length];
+      if (mesh.color) {
+        const c = mesh.color;
+        color = new THREE.Color(c[0] / 255, c[1] / 255, c[2] / 255).getHex();
       }
-      if (mesh.index) {
-        for (let i = 0; i < mesh.index.array.length; i++) {
-          allIndices.push(mesh.index.array[i] + vertOffset);
-        }
-      }
-      vertOffset += (mesh.attributes.find(a => a.name === 'position')?.array.length || 0) / 3;
+      
+      const vertCount = verts.length / 3;
+      const faceCount = indices ? indices.length / 3 : vertCount / 3;
+      totalVerts += vertCount;
+      totalFaces += faceCount;
+      
+      bodies.push({ vertices: verts, indices, normals, color, vertCount, faceCount });
     }
     
-    parsedMesh = {
-      vertices: new Float32Array(allVerts),
-      indices: new Uint32Array(allIndices),
-      normals: new Float32Array(allNormals),
-      vertexCount: allVerts.length / 3,
-      faceCount: allIndices.length / 3
-    };
+    if (bodies.length === 0) throw new Error('Geen geometrie gevonden in STEP bestand');
+    
+    parsedData = { bodies, totalVerts, totalFaces, fileSize: file.size };
     
     showProgress('3D preview laden...', 80);
     setupPreview();
+    updateMeshInfo();
     showProgress('Klaar!', 100);
     setTimeout(() => { progress.classList.remove('active'); }, 500);
   } catch (err) {
@@ -100,60 +120,105 @@ async function handleFile(file) {
   }
 }
 
+// --- Mesh Info ---
+function updateMeshInfo() {
+  if (!parsedData) return;
+  meshInfo.classList.add('active');
+  document.getElementById('infoVerts').textContent = parsedData.totalVerts.toLocaleString('nl-NL');
+  document.getElementById('infoFaces').textContent = parsedData.totalFaces.toLocaleString('nl-NL');
+  document.getElementById('infoBodies').textContent = parsedData.bodies.length;
+  document.getElementById('infoSize').textContent = formatSize(parsedData.fileSize);
+  
+  // Compute bounding box from all bodies
+  const box = new THREE.Box3();
+  for (const body of parsedData.bodies) {
+    const v = body.vertices;
+    for (let i = 0; i < v.length; i += 3) {
+      box.expandByPoint(new THREE.Vector3(v[i], v[i+1], v[i+2]));
+    }
+  }
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  document.getElementById('infoDims').textContent = `${size.x.toFixed(1)} × ${size.y.toFixed(1)} × ${size.z.toFixed(1)}`;
+}
+
 // --- 3D Preview ---
 function setupPreview() {
-  if (!parsedMesh) return;
+  if (!parsedData) return;
   
-  // Clear existing
+  // Clear existing (keep toolbar)
+  const toolbar = previewToolbar;
   previewPanel.innerHTML = '';
+  previewPanel.appendChild(toolbar);
+  toolbar.style.display = 'flex';
   
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x111111);
   
   const w = previewPanel.clientWidth;
   const h = previewPanel.clientHeight || 400;
-  camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 10000);
+  camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100000);
   renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(w, h);
   renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.2;
   previewPanel.appendChild(renderer.domElement);
   
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   
-  // Geometry
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(parsedMesh.vertices, 3));
-  if (parsedMesh.normals.length > 0) {
-    geo.setAttribute('normal', new THREE.BufferAttribute(parsedMesh.normals, 3));
-  }
-  if (parsedMesh.indices.length > 0) {
-    geo.setIndex(new THREE.BufferAttribute(parsedMesh.indices, 1));
-  }
-  if (parsedMesh.normals.length === 0) geo.computeVertexNormals();
+  // Create group for all body meshes
+  meshGroup = new THREE.Group();
   
-  const mat = new THREE.MeshStandardMaterial({ color: 0x4fc3f7, metalness: 0.3, roughness: 0.6, side: THREE.DoubleSide });
-  const mesh = new THREE.Mesh(geo, mat);
-  scene.add(mesh);
+  for (const body of parsedData.bodies) {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(body.vertices, 3));
+    if (body.normals && body.normals.length > 0) {
+      geo.setAttribute('normal', new THREE.BufferAttribute(body.normals, 3));
+    }
+    if (body.indices && body.indices.length > 0) {
+      geo.setIndex(new THREE.BufferAttribute(body.indices, 1));
+    }
+    if (!body.normals || body.normals.length === 0) geo.computeVertexNormals();
+    
+    const mat = new THREE.MeshStandardMaterial({
+      color: body.color,
+      metalness: 0.3,
+      roughness: 0.6,
+      side: THREE.DoubleSide,
+    });
+    const m = new THREE.Mesh(geo, mat);
+    m.userData.baseColor = body.color;
+    meshGroup.add(m);
+  }
+  scene.add(meshGroup);
   
   // Lighting
-  scene.add(new THREE.AmbientLight(0xffffff, 0.4));
-  const dir = new THREE.DirectionalLight(0xffffff, 0.8);
-  dir.position.set(5, 10, 7);
-  scene.add(dir);
-  scene.add(new THREE.DirectionalLight(0xffffff, 0.3).position.set(-5, -5, -5));
+  scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+  const dir1 = new THREE.DirectionalLight(0xffffff, 0.8);
+  dir1.position.set(5, 10, 7);
+  scene.add(dir1);
+  const dir2 = new THREE.DirectionalLight(0xffffff, 0.3);
+  dir2.position.set(-5, -5, -5);
+  scene.add(dir2);
   
-  // Fit camera
-  geo.computeBoundingSphere();
-  const sphere = geo.boundingSphere;
+  // Fit camera to all geometry
+  const box = new THREE.Box3().setFromObject(meshGroup);
+  const sphere = new THREE.Sphere();
+  box.getBoundingSphere(sphere);
   const dist = sphere.radius * 2.5;
   camera.position.set(sphere.center.x + dist, sphere.center.y + dist * 0.5, sphere.center.z + dist);
   controls.target.copy(sphere.center);
   controls.update();
   
+  // Save initial camera for reset
+  initialCamPos = camera.position.clone();
+  initialTarget = controls.target.clone();
+  
   // Grid
   const grid = new THREE.GridHelper(sphere.radius * 4, 20, 0x333333, 0x222222);
-  grid.position.y = sphere.center.y - sphere.radius;
+  grid.position.y = box.min.y;
   scene.add(grid);
   
   // Render loop
@@ -168,16 +233,46 @@ function setupPreview() {
   const ro = new ResizeObserver(() => {
     const w2 = previewPanel.clientWidth;
     const h2 = previewPanel.clientHeight;
-    camera.aspect = w2 / h2;
-    camera.updateProjectionMatrix();
-    renderer.setSize(w2, h2);
+    if (w2 && h2) {
+      camera.aspect = w2 / h2;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w2, h2);
+    }
   });
   ro.observe(previewPanel);
 }
 
+// --- Wireframe toggle ---
+function toggleWireframe() {
+  if (!meshGroup) return;
+  wireframeOn = !wireframeOn;
+  btnWireframe.classList.toggle('active', wireframeOn);
+  meshGroup.children.forEach(m => {
+    m.material.wireframe = wireframeOn;
+  });
+}
+
+// --- Camera reset ---
+function resetCamera() {
+  if (!camera || !initialCamPos) return;
+  camera.position.copy(initialCamPos);
+  controls.target.copy(initialTarget);
+  controls.update();
+}
+
+btnWireframe.addEventListener('click', toggleWireframe);
+btnResetCam.addEventListener('click', resetCamera);
+
+// --- Keyboard shortcuts ---
+window.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.key === 'w' || e.key === 'W') toggleWireframe();
+  if (e.key === 'r' || e.key === 'R') resetCamera();
+});
+
 // --- Convert ---
 convertBtn.addEventListener('click', async () => {
-  if (!parsedMesh) return;
+  if (!parsedData) return;
   
   const formats = [...document.querySelectorAll('.format-btn.active')].map(b => b.dataset.format);
   if (formats.length === 0) { showError('Selecteer minstens één formaat.'); return; }
@@ -194,6 +289,7 @@ convertBtn.addEventListener('click', async () => {
         case 'obj': [blob, ext] = [exportOBJ(), 'obj']; break;
         case 'stl': [blob, ext] = [exportSTL(), 'stl']; break;
         case 'dxf': [blob, ext] = [exportDXF(), 'dxf']; break;
+        case 'glb': [blob, ext] = [await exportGLB(), 'glb']; break;
       }
       addResult(fmt.toUpperCase(), `${baseName}.${ext}`, blob);
     } catch (err) {
@@ -204,11 +300,35 @@ convertBtn.addEventListener('click', async () => {
   setTimeout(() => progress.classList.remove('active'), 500);
 });
 
+// --- Helper: get merged mesh data ---
+function getMergedMesh() {
+  const allVerts = [];
+  const allIndices = [];
+  const allNormals = [];
+  let vertOffset = 0;
+  
+  for (const body of parsedData.bodies) {
+    for (let i = 0; i < body.vertices.length; i++) allVerts.push(body.vertices[i]);
+    if (body.normals) {
+      for (let i = 0; i < body.normals.length; i++) allNormals.push(body.normals[i]);
+    }
+    if (body.indices) {
+      for (let i = 0; i < body.indices.length; i++) {
+        allIndices.push(body.indices[i] + vertOffset);
+      }
+    }
+    vertOffset += body.vertCount;
+  }
+  return {
+    vertices: new Float32Array(allVerts),
+    indices: new Uint32Array(allIndices),
+    normals: new Float32Array(allNormals),
+  };
+}
+
 // --- Exporters ---
 function exportOBJ() {
-  const v = parsedMesh.vertices;
-  const idx = parsedMesh.indices;
-  const n = parsedMesh.normals;
+  const { vertices: v, indices: idx, normals: n } = getMergedMesh();
   let obj = '# STEP Converter — OBJ Export\n';
   
   for (let i = 0; i < v.length; i += 3) {
@@ -221,8 +341,7 @@ function exportOBJ() {
   }
   if (idx.length > 0) {
     for (let i = 0; i < idx.length; i += 3) {
-      const hasN = n.length > 0;
-      if (hasN) {
+      if (n.length > 0) {
         obj += `f ${idx[i]+1}//${idx[i]+1} ${idx[i+1]+1}//${idx[i+1]+1} ${idx[i+2]+1}//${idx[i+2]+1}\n`;
       } else {
         obj += `f ${idx[i]+1} ${idx[i+1]+1} ${idx[i+2]+1}\n`;
@@ -233,23 +352,18 @@ function exportOBJ() {
 }
 
 function exportSTL() {
-  const v = parsedMesh.vertices;
-  const idx = parsedMesh.indices;
+  const { vertices: v, indices: idx } = getMergedMesh();
   const faceCount = idx.length / 3;
-  
-  // Binary STL: 80 header + 4 bytes face count + 50 bytes per face
   const bufSize = 84 + faceCount * 50;
   const buf = new ArrayBuffer(bufSize);
   const view = new DataView(buf);
   const header = new Uint8Array(buf, 0, 80);
-  const enc = new TextEncoder();
-  header.set(enc.encode('STEP Converter — STL Export'));
+  header.set(new TextEncoder().encode('STEP Converter — STL Export'));
   view.setUint32(80, faceCount, true);
   
   let offset = 84;
   for (let i = 0; i < idx.length; i += 3) {
     const i0 = idx[i] * 3, i1 = idx[i+1] * 3, i2 = idx[i+2] * 3;
-    // Compute normal
     const ax = v[i1] - v[i0], ay = v[i1+1] - v[i0+1], az = v[i1+2] - v[i0+2];
     const bx = v[i2] - v[i0], by = v[i2+1] - v[i0+1], bz = v[i2+2] - v[i0+2];
     const nx = ay*bz - az*by, ny = az*bx - ax*bz, nz = ax*by - ay*bx;
@@ -270,8 +384,7 @@ function exportSTL() {
 }
 
 function exportDXF() {
-  const v = parsedMesh.vertices;
-  const idx = parsedMesh.indices;
+  const { vertices: v, indices: idx } = getMergedMesh();
   let dxf = '0\nSECTION\n2\nHEADER\n0\nENDSEC\n';
   dxf += '0\nSECTION\n2\nENTITIES\n';
   
@@ -285,6 +398,13 @@ function exportDXF() {
   }
   dxf += '0\nENDSEC\n0\nEOF\n';
   return new Blob([dxf], { type: 'application/dxf' });
+}
+
+async function exportGLB() {
+  if (!meshGroup) throw new Error('Geen 3D scene beschikbaar');
+  const exporter = new GLTFExporter();
+  const glb = await exporter.parseAsync(meshGroup, { binary: true });
+  return new Blob([glb], { type: 'model/gltf-binary' });
 }
 
 // --- Utils ---
@@ -304,6 +424,7 @@ function showProgress(text, pct) {
   progress.classList.add('active');
   progressFill.style.width = pct + '%';
   progressText.textContent = text;
+  spinner.style.display = pct >= 100 ? 'none' : 'block';
 }
 
 function showError(msg) {

@@ -30,12 +30,6 @@
     }
     .format-btn:hover { border-color: #4fc3f7; color: #fff; }
     .format-btn.active { background: #4fc3f7; color: #000; border-color: #4fc3f7; font-weight: 600; }
-    .format-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-    
-    select {
-      padding: 8px 16px; border: 1px solid #333; border-radius: 8px;
-      background: #1a1a1a; color: #ccc; font-size: 0.9rem;
-    }
     
     .convert-btn {
       padding: 10px 32px; border: none; border-radius: 8px;
@@ -48,7 +42,29 @@
     .layout { display: flex; gap: 24px; }
     .preview-panel { flex: 1; min-height: 400px; background: #111; border-radius: 12px; position: relative; overflow: hidden; }
     .preview-panel canvas { width: 100% !important; height: 100% !important; display: block; }
-    .results-panel { width: 320px; }
+    
+    .preview-toolbar {
+      position: absolute; top: 12px; right: 12px; display: flex; gap: 8px; z-index: 10;
+    }
+    .toolbar-btn {
+      padding: 6px 12px; border: 1px solid #444; border-radius: 6px;
+      background: rgba(26,26,26,0.85); color: #ccc; cursor: pointer; font-size: 0.8rem;
+      backdrop-filter: blur(4px); transition: all 0.2s;
+    }
+    .toolbar-btn:hover { border-color: #4fc3f7; color: #fff; }
+    .toolbar-btn.active { background: rgba(79,195,247,0.2); border-color: #4fc3f7; color: #4fc3f7; }
+    
+    .sidebar { width: 320px; display: flex; flex-direction: column; gap: 16px; }
+    
+    .mesh-info {
+      background: #111; border-radius: 8px; padding: 16px; border: 1px solid #222;
+      display: none;
+    }
+    .mesh-info.active { display: block; }
+    .mesh-info h3 { font-size: 0.9rem; color: #4fc3f7; margin-bottom: 8px; }
+    .mesh-info .row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.85rem; }
+    .mesh-info .row .label { color: #888; }
+    .mesh-info .row .value { color: #e0e0e0; font-weight: 600; }
     
     .result-card {
       background: #111; border-radius: 8px; padding: 16px; margin-bottom: 12px;
@@ -64,15 +80,23 @@
     .result-card a:hover { background: #222; border-color: #4fc3f7; }
     
     .progress { display: none; margin-bottom: 24px; }
-    .progress.active { display: block; }
-    .progress-bar { height: 4px; background: #222; border-radius: 2px; overflow: hidden; }
+    .progress.active { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .spinner {
+      width: 24px; height: 24px; border: 3px solid #333; border-top-color: #4fc3f7;
+      border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .progress-bar { flex: 1; min-width: 200px; height: 4px; background: #222; border-radius: 2px; overflow: hidden; }
     .progress-bar .fill { height: 100%; background: #4fc3f7; transition: width 0.3s; width: 0%; }
-    .progress-text { color: #888; font-size: 0.85rem; margin-top: 6px; }
+    .progress-text { width: 100%; color: #888; font-size: 0.85rem; margin-top: 2px; }
     
     .error { color: #ef5350; background: #1a0000; border: 1px solid #ef5350; padding: 12px; border-radius: 8px; margin-bottom: 16px; display: none; }
     .error.active { display: block; }
     
-    @media (max-width: 768px) { .layout { flex-direction: column; } .results-panel { width: 100%; } }
+    .shortcuts { position: fixed; bottom: 16px; right: 16px; background: rgba(17,17,17,0.9); border: 1px solid #333; border-radius: 8px; padding: 12px 16px; font-size: 0.75rem; color: #666; backdrop-filter: blur(4px); }
+    .shortcuts kbd { background: #222; padding: 2px 6px; border-radius: 3px; color: #999; border: 1px solid #444; font-family: inherit; }
+    
+    @media (max-width: 768px) { .layout { flex-direction: column; } .sidebar { width: 100%; } .shortcuts { display: none; } }
   </style>
 </head>
 <body>
@@ -93,23 +117,39 @@
       <button class="format-btn active" data-format="obj">OBJ</button>
       <button class="format-btn active" data-format="stl">STL</button>
       <button class="format-btn active" data-format="dxf">DXF</button>
-      <select id="quality">
-        <option value="high">Hoge kwaliteit</option>
-        <option value="medium" selected>Standaard</option>
-        <option value="low">Snel (laag)</option>
-      </select>
+      <button class="format-btn active" data-format="glb">GLB</button>
       <button class="convert-btn" id="convertBtn" disabled>Converteer</button>
     </div>
     
     <div class="progress" id="progress">
+      <div class="spinner" id="spinner"></div>
       <div class="progress-bar"><div class="fill" id="progressFill"></div></div>
       <p class="progress-text" id="progressText">Laden...</p>
     </div>
     
     <div class="layout">
-      <div class="preview-panel" id="previewPanel"></div>
-      <div class="results-panel" id="results"></div>
+      <div class="preview-panel" id="previewPanel">
+        <div class="preview-toolbar" id="previewToolbar" style="display:none">
+          <button class="toolbar-btn" id="btnWireframe" title="Wireframe toggle (W)">Wireframe</button>
+          <button class="toolbar-btn" id="btnResetCam" title="Camera reset (R)">Reset cam</button>
+        </div>
+      </div>
+      <div class="sidebar">
+        <div class="mesh-info" id="meshInfo">
+          <h3>📐 Mesh Info</h3>
+          <div class="row"><span class="label">Vertices</span><span class="value" id="infoVerts">—</span></div>
+          <div class="row"><span class="label">Faces</span><span class="value" id="infoFaces">—</span></div>
+          <div class="row"><span class="label">Bodies</span><span class="value" id="infoBodies">—</span></div>
+          <div class="row"><span class="label">Afmetingen</span><span class="value" id="infoDims">—</span></div>
+          <div class="row"><span class="label">Bestandsgrootte</span><span class="value" id="infoSize">—</span></div>
+        </div>
+        <div id="results"></div>
+      </div>
     </div>
+  </div>
+
+  <div class="shortcuts">
+    <kbd>W</kbd> Wireframe &nbsp; <kbd>R</kbd> Reset camera
   </div>
 
   <script type="importmap">
