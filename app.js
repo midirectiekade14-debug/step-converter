@@ -466,24 +466,14 @@ convertBtn.addEventListener('click', async () => {
     try {
       let blob, ext;
       switch (fmt) {
-        case 'obj': {
-          blob = exportOBJ(); ext = 'obj';
-          // Also add MTL file as separate download
-          if (exportOBJ._mtlBlob) addResult('MTL', exportOBJ._mtlName, exportOBJ._mtlBlob);
-          break;
-        }
+        case 'obj': [blob, ext] = [exportOBJ(), 'obj']; break;
         case 'stl': [blob, ext] = [exportSTL(), 'stl']; break;
         case 'dxf': [blob, ext] = [exportDXF(), 'dxf']; break;
         case 'glb': [blob, ext] = [await exportGLB(), 'glb']; break;
         case 'gltf': [blob, ext] = [await exportGLTF(), 'gltf']; break;
         case 'ply': [blob, ext] = [exportPLY(), 'ply']; break;
         case 'dae': [blob, ext] = [exportDAE(), 'dae']; break;
-        case 'skp': {
-          // SKP = OBJ+MTL export (use obj2skp.py locally to convert to native .skp)
-          blob = exportOBJ(); ext = 'obj';
-          if (exportOBJ._mtlBlob) addResult('MTL', exportOBJ._mtlName, exportOBJ._mtlBlob);
-          break;
-        }
+        case 'skp': [blob, ext] = [exportOBJ(), 'obj']; break;
       }
       addResult(fmt.toUpperCase(), `${baseName}.${ext}`, blob);
     } catch (err) {
@@ -529,19 +519,19 @@ function getMergedMesh() {
 // --- Exporters ---
 function exportOBJ() {
   const bodies = parsedData.bodies;
-  const baseName = loadedFile.name.replace(/\.[^.]+$/, '');
 
-  // Build MTL content
-  let mtl = '# STEP Converter — MTL Export\n';
+  // Build OBJ with inline color comments (parsed by obj2skp.py)
+  let obj = '# STEP Converter — OBJ Export\n';
+
+  // Embed material colors as inline comments: #!color <name> <r> <g> <b>
   for (let bi = 0; bi < bodies.length; bi++) {
     const name = (bodies[bi].material || `Body_${bi + 1}`).replace(/\s+/g, '_');
     const hex = bodies[bi].color || 0x888888;
-    const r = ((hex >> 16) & 0xff) / 255, g = ((hex >> 8) & 0xff) / 255, b = (hex & 0xff) / 255;
-    mtl += `\nnewmtl ${name}\nKd ${r.toFixed(4)} ${g.toFixed(4)} ${b.toFixed(4)}\nKa 0.1 0.1 0.1\nKs 0.3 0.3 0.3\nNs 32\nd 1.0\n`;
+    const r = (hex >> 16) & 0xff, g = (hex >> 8) & 0xff, b = hex & 0xff;
+    obj += `#!color ${name} ${r} ${g} ${b}\n`;
   }
+  obj += '\n';
 
-  // Build OBJ with per-body groups and materials
-  let obj = `# STEP Converter — OBJ Export\nmtllib ${baseName}.mtl\n\n`;
   let globalVertOffset = 0;
   let globalNormOffset = 0;
 
@@ -575,10 +565,6 @@ function exportOBJ() {
     if (n && n.length > 0) globalNormOffset += n.length / 3;
   }
 
-  // Return both OBJ and MTL as a zip-like pair
-  // Store MTL blob for download alongside OBJ
-  exportOBJ._mtlBlob = new Blob([mtl], { type: 'text/plain' });
-  exportOBJ._mtlName = `${baseName}.mtl`;
   return new Blob([obj], { type: 'text/plain' });
 }
 
