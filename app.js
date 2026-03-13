@@ -466,14 +466,24 @@ convertBtn.addEventListener('click', async () => {
     try {
       let blob, ext;
       switch (fmt) {
-        case 'obj': [blob, ext] = [exportOBJ(), 'obj']; break;
+        case 'obj': {
+          blob = exportOBJ(); ext = 'obj';
+          // Also add MTL file as separate download
+          if (exportOBJ._mtlBlob) addResult('MTL', exportOBJ._mtlName, exportOBJ._mtlBlob);
+          break;
+        }
         case 'stl': [blob, ext] = [exportSTL(), 'stl']; break;
         case 'dxf': [blob, ext] = [exportDXF(), 'dxf']; break;
         case 'glb': [blob, ext] = [await exportGLB(), 'glb']; break;
         case 'gltf': [blob, ext] = [await exportGLTF(), 'gltf']; break;
         case 'ply': [blob, ext] = [exportPLY(), 'ply']; break;
         case 'dae': [blob, ext] = [exportDAE(), 'dae']; break;
-        case 'skp': [blob, ext] = [exportSKP(), 'skp.rb']; break;
+        case 'skp': {
+          // SKP = OBJ+MTL export (use obj2skp.py locally to convert to native .skp)
+          blob = exportOBJ(); ext = 'obj';
+          if (exportOBJ._mtlBlob) addResult('MTL', exportOBJ._mtlName, exportOBJ._mtlBlob);
+          break;
+        }
       }
       addResult(fmt.toUpperCase(), `${baseName}.${ext}`, blob);
     } catch (err) {
@@ -518,26 +528,57 @@ function getMergedMesh() {
 
 // --- Exporters ---
 function exportOBJ() {
-  const { vertices: v, indices: idx, normals: n } = getMergedMesh();
-  let obj = '# STEP Converter — OBJ Export\n';
-  
-  for (let i = 0; i < v.length; i += 3) {
-    obj += `v ${v[i].toFixed(6)} ${v[i+1].toFixed(6)} ${v[i+2].toFixed(6)}\n`;
+  const bodies = parsedData.bodies;
+  const baseName = loadedFile.name.replace(/\.[^.]+$/, '');
+
+  // Build MTL content
+  let mtl = '# STEP Converter — MTL Export\n';
+  for (let bi = 0; bi < bodies.length; bi++) {
+    const name = (bodies[bi].material || `Body_${bi + 1}`).replace(/\s+/g, '_');
+    const hex = bodies[bi].color || 0x888888;
+    const r = ((hex >> 16) & 0xff) / 255, g = ((hex >> 8) & 0xff) / 255, b = (hex & 0xff) / 255;
+    mtl += `\nnewmtl ${name}\nKd ${r.toFixed(4)} ${g.toFixed(4)} ${b.toFixed(4)}\nKa 0.1 0.1 0.1\nKs 0.3 0.3 0.3\nNs 32\nd 1.0\n`;
   }
-  if (n.length > 0) {
-    for (let i = 0; i < n.length; i += 3) {
-      obj += `vn ${n[i].toFixed(6)} ${n[i+1].toFixed(6)} ${n[i+2].toFixed(6)}\n`;
+
+  // Build OBJ with per-body groups and materials
+  let obj = `# STEP Converter — OBJ Export\nmtllib ${baseName}.mtl\n\n`;
+  let globalVertOffset = 0;
+  let globalNormOffset = 0;
+
+  for (let bi = 0; bi < bodies.length; bi++) {
+    const body = bodies[bi];
+    const v = body.vertices;
+    const n = body.normals;
+    const idx = body.indices || (() => { const a = []; for (let i = 0; i < body.vertCount; i++) a.push(i); return new Uint32Array(a); })();
+    const name = (body.material || `Body_${bi + 1}`).replace(/\s+/g, '_');
+
+    obj += `o ${name}\nusemtl ${name}\n`;
+    for (let i = 0; i < v.length; i += 3) {
+      obj += `v ${v[i].toFixed(6)} ${v[i+1].toFixed(6)} ${v[i+2].toFixed(6)}\n`;
     }
-  }
-  if (idx.length > 0) {
-    for (let i = 0; i < idx.length; i += 3) {
-      if (n.length > 0) {
-        obj += `f ${idx[i]+1}//${idx[i]+1} ${idx[i+1]+1}//${idx[i+1]+1} ${idx[i+2]+1}//${idx[i+2]+1}\n`;
-      } else {
-        obj += `f ${idx[i]+1} ${idx[i+1]+1} ${idx[i+2]+1}\n`;
+    if (n && n.length > 0) {
+      for (let i = 0; i < n.length; i += 3) {
+        obj += `vn ${n[i].toFixed(6)} ${n[i+1].toFixed(6)} ${n[i+2].toFixed(6)}\n`;
       }
     }
+    for (let i = 0; i < idx.length; i += 3) {
+      const a = idx[i] + 1 + globalVertOffset, b2 = idx[i+1] + 1 + globalVertOffset, c = idx[i+2] + 1 + globalVertOffset;
+      if (n && n.length > 0) {
+        const na = idx[i] + 1 + globalNormOffset, nb = idx[i+1] + 1 + globalNormOffset, nc = idx[i+2] + 1 + globalNormOffset;
+        obj += `f ${a}//${na} ${b2}//${nb} ${c}//${nc}\n`;
+      } else {
+        obj += `f ${a} ${b2} ${c}\n`;
+      }
+    }
+    obj += '\n';
+    globalVertOffset += v.length / 3;
+    if (n && n.length > 0) globalNormOffset += n.length / 3;
   }
+
+  // Return both OBJ and MTL as a zip-like pair
+  // Store MTL blob for download alongside OBJ
+  exportOBJ._mtlBlob = new Blob([mtl], { type: 'text/plain' });
+  exportOBJ._mtlName = `${baseName}.mtl`;
   return new Blob([obj], { type: 'text/plain' });
 }
 
@@ -649,75 +690,7 @@ async function exportGLTF() {
   return new Blob([json], { type: 'model/gltf+json' });
 }
 
-function exportSKP() {
-  const bodies = parsedData.bodies;
-  const lines = [];
-  lines.push('# ===========================================================================');
-  lines.push('# SketchUp Ruby Script — gegenereerd door 3D Converter');
-  lines.push('# Gebruik: Plugins > Ruby Importer > Importeer .rb bestand');
-  lines.push('#    of: Window > Ruby Console → load "pad/naar/bestand.rb"');
-  lines.push('# ===========================================================================');
-  lines.push('');
-  lines.push('model = Sketchup.active_model');
-  lines.push('ents = model.active_entities');
-  lines.push('materials = model.materials');
-  lines.push('');
-  lines.push("model.start_operation('Import 3D Model', true)");
-  lines.push('');
-
-  // Materialen aanmaken per body
-  for (let bi = 0; bi < bodies.length; bi++) {
-    const name = bodies[bi].material || `Body_${bi + 1}`;
-    const hex = bodies[bi].color;
-    const r = (hex >> 16) & 0xff, g = (hex >> 8) & 0xff, b = hex & 0xff;
-    lines.push(`mat_${bi} = materials.add('${name.replace(/'/g, "\\\\'")}')`);
-    lines.push(`mat_${bi}.color = Sketchup::Color.new(${r}, ${g}, ${b})`);
-  }
-  lines.push('');
-
-  // Per body: eigen PolygonMesh + group
-  for (let bi = 0; bi < bodies.length; bi++) {
-    const body = bodies[bi];
-    const v = body.vertices;
-    const idx = body.indices || (() => { const a = []; for (let i = 0; i < body.vertCount; i++) a.push(i); return new Uint32Array(a); })();
-    const name = body.material || `Body_${bi + 1}`;
-
-    lines.push(`# --- ${name} (${body.vertCount} verts, ${body.faceCount} faces) ---`);
-    lines.push(`mesh_${bi} = Geom::PolygonMesh.new(${body.vertCount}, ${Math.floor(idx.length / 3)})`);
-
-    // Punten (PolygonMesh indices zijn 1-based)
-    for (let i = 0; i < v.length; i += 3) {
-      // mm → inches (SketchUp intern)
-      const x = (v[i] / 25.4).toFixed(6);
-      const y = (v[i+1] / 25.4).toFixed(6);
-      const z = (v[i+2] / 25.4).toFixed(6);
-      lines.push(`mesh_${bi}.add_point(Geom::Point3d.new(${x}, ${y}, ${z}))`);
-    }
-
-    // Polygonen
-    for (let i = 0; i < idx.length; i += 3) {
-      lines.push(`mesh_${bi}.add_polygon(${idx[i]+1}, ${idx[i+1]+1}, ${idx[i+2]+1})`);
-    }
-
-    // Groep + fill + materiaal
-    lines.push(`grp_${bi} = ents.add_group`);
-    lines.push(`grp_${bi}.name = '${name.replace(/'/g, "\\\\'")}'`);
-    lines.push(`grp_${bi}.entities.fill_from_mesh(mesh_${bi}, true, Geom::PolygonMesh::AUTO_SOFTEN)`);
-    lines.push(`grp_${bi}.material = mat_${bi}`);
-    lines.push('');
-  }
-
-  lines.push('model.commit_operation');
-  lines.push('model.active_view.zoom_extents');
-  lines.push(`puts "Import voltooid: ${bodies.length} onderdelen"`);
-  for (let bi = 0; bi < bodies.length; bi++) {
-    const name = bodies[bi].material || `Body_${bi + 1}`;
-    lines.push(`puts "  ${name}: ${bodies[bi].vertCount} vertices, ${bodies[bi].faceCount} faces"`);
-  }
-
-  const rb = lines.join('\n') + '\n';
-  return new Blob([rb], { type: 'text/plain' });
-}
+// exportSKP is now handled via OBJ export + obj2skp.py local converter
 
 function exportDAE() {
   const { vertices: v, indices: idx, normals: n, materials: mats } = getMergedMesh();
