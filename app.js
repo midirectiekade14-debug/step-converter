@@ -1,7 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
-import { ColladaExporter } from 'three/addons/exporters/ColladaExporter.js';
 
 // --- State ---
 let loadedFile = null;
@@ -647,10 +646,66 @@ function exportSKP() {
 }
 
 function exportDAE() {
-  if (!meshGroup) throw new Error('Geen 3D scene beschikbaar');
-  const exporter = new ColladaExporter();
-  const result = exporter.parse(meshGroup);
-  return new Blob([result.data], { type: 'model/vnd.collada+xml' });
+  const { vertices: v, indices: idx, normals: n, materials: mats } = getMergedMesh();
+  const vertCount = v.length / 3;
+  const faceCount = idx.length / 3;
+
+  let posArr = '';
+  for (let i = 0; i < v.length; i++) posArr += v[i].toFixed(6) + ' ';
+  let normArr = '';
+  if (n.length > 0) for (let i = 0; i < n.length; i++) normArr += n[i].toFixed(6) + ' ';
+
+  let faces = '';
+  for (let i = 0; i < idx.length; i += 3) {
+    if (n.length > 0) {
+      faces += `${idx[i]} ${idx[i]} ${idx[i+1]} ${idx[i+1]} ${idx[i+2]} ${idx[i+2]} `;
+    } else {
+      faces += `${idx[i]} ${idx[i+1]} ${idx[i+2]} `;
+    }
+  }
+
+  const inputStride = n.length > 0
+    ? '<input semantic="VERTEX" source="#mesh-vertices" offset="0"/><input semantic="NORMAL" source="#mesh-normals" offset="1"/>'
+    : '<input semantic="VERTEX" source="#mesh-vertices" offset="0"/>';
+  const vcount = Array(faceCount).fill('3').join(' ');
+
+  let dae = `<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset><created>${new Date().toISOString()}</created><up_axis>Y_UP</up_axis></asset>
+  <library_geometries>
+    <geometry id="mesh" name="mesh">
+      <mesh>
+        <source id="mesh-positions">
+          <float_array id="mesh-positions-array" count="${v.length}">${posArr.trim()}</float_array>
+          <technique_common><accessor source="#mesh-positions-array" count="${vertCount}" stride="3">
+            <param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>
+          </accessor></technique_common>
+        </source>`;
+  if (n.length > 0) {
+    dae += `
+        <source id="mesh-normals">
+          <float_array id="mesh-normals-array" count="${n.length}">${normArr.trim()}</float_array>
+          <technique_common><accessor source="#mesh-normals-array" count="${vertCount}" stride="3">
+            <param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>
+          </accessor></technique_common>
+        </source>`;
+  }
+  dae += `
+        <vertices id="mesh-vertices"><input semantic="POSITION" source="#mesh-positions"/></vertices>
+        <polylist count="${faceCount}">${inputStride}<vcount>${vcount}</vcount><p>${faces.trim()}</p></polylist>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="Model" name="Model" type="NODE">
+        <instance_geometry url="#mesh"/>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene><instance_visual_scene url="#Scene"/></scene>
+</COLLADA>`;
+  return new Blob([dae], { type: 'model/vnd.collada+xml' });
 }
 
 function exportPLY() {
